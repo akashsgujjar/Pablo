@@ -27,6 +27,7 @@ type Game struct {
 	CurrentPlayer      string
 	Status             string // "waiting", "playing", "ended"
 	PabloCalled        bool
+	PabloCaller        string
 	mu                 sync.RWMutex
 }
 
@@ -62,6 +63,7 @@ func NewGame(id string) *Game {
 		Status:             "waiting",
 		CurrentPlayer:      "",
 		PabloCalled:        false,
+		PabloCaller:        "",
 	}
 	shuffleDeck(game.Deck)
 	return game
@@ -354,6 +356,7 @@ func (g *Game) CallPablo(playerID string) {
 	}
 
 	g.PabloCalled = true
+	g.PabloCaller = playerID
 	g.broadcastGameState()
 }
 
@@ -396,19 +399,23 @@ func (g *Game) EndTurn(playerID string) {
 
 	if currentIdx >= 0 {
 		nextIdx := (currentIdx + 1) % len(playerIDs)
+
 		// Clear any drawn cards from the previous player (safety check)
 		delete(g.DrawnCards, playerID)
 		// Reset the "has drawn" flag for the previous player
 		delete(g.HasDrawnThisTurn, playerID)
-		// Reset the "has drawn" flag for the new current player (fresh turn)
-		g.CurrentPlayer = playerIDs[nextIdx]
-		delete(g.HasDrawnThisTurn, g.CurrentPlayer)
-	}
 
-	// If Pablo was called, end the round
-	if g.PabloCalled {
-		g.EndRound()
-		return
+		// If Pablo was called, everyone except the caller gets one more turn.
+		// When turn order would come back to the caller, we end the round instead.
+		if g.PabloCalled && playerIDs[nextIdx] == g.PabloCaller {
+			g.EndRound()
+			return
+		}
+
+		// Otherwise, pass turn to the next player
+		g.CurrentPlayer = playerIDs[nextIdx]
+		// Reset the "has drawn" flag for the new current player (fresh turn)
+		delete(g.HasDrawnThisTurn, g.CurrentPlayer)
 	}
 
 	g.broadcastGameState()
@@ -416,6 +423,8 @@ func (g *Game) EndTurn(playerID string) {
 
 func (g *Game) EndRound() {
 	g.Status = "ended"
+	g.PabloCalled = false
+	g.PabloCaller = ""
 
 	// Reveal all cards
 	for _, player := range g.Players {

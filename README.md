@@ -1,5 +1,11 @@
 # Pablo Card Game
 
+## TODO
+- stacking logic
+- swapping visuals
+- game appearance
+- seating arrangements based on number of players
+
 A multiplayer card game where players try to minimize the sum of their card values.
 
 ## Game Rules
