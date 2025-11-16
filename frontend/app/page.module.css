@@ -5,6 +5,9 @@
   flex-direction: column;
   align-items: center;
   color: white;
+  background: radial-gradient(1200px 800px at 50% 40%, rgba(7, 71, 55, 0.55), rgba(4, 36, 30, 0.9) 60%, #061b16 100%);
+  background-color: #05221b;
+  overflow-x: hidden;
 }
 
 .joinForm {
@@ -37,25 +40,28 @@
 
 .button {
   padding: 12px 24px;
-  border-radius: 8px;
+  border-radius: 10px;
   border: none;
-  background: rgba(255, 255, 255, 0.2);
+  background: linear-gradient(135deg, #00c6ff 0%, #0072ff 100%);
   color: white;
   font-size: 16px;
   font-weight: bold;
   cursor: pointer;
-  transition: all 0.3s;
+  transition: all 0.18s ease;
   backdrop-filter: blur(10px);
+  box-shadow: 0 8px 24px rgba(0, 114, 255, 0.35);
 }
 
 .button:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.3);
   transform: translateY(-2px);
+  box-shadow: 0 12px 28px rgba(0, 114, 255, 0.5);
 }
 
 .button:disabled {
-  opacity: 0.5;
+  opacity: 0.65;
   cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
 }
 
 .gameHeader {
@@ -68,6 +74,8 @@
 .gameHeader h1 {
   font-size: 3rem;
   margin-bottom: 10px;
+  letter-spacing: 1px;
+  text-shadow: 0 2px 8px rgba(0,0,0,0.35);
 }
 
 .gameInfo {
@@ -81,6 +89,9 @@
   color: #ffd700;
   font-weight: bold;
   animation: pulse 1s infinite;
+  background: rgba(0,0,0,0.25);
+  padding: 4px 10px;
+  border-radius: 999px;
 }
 
 @keyframes pulse {
@@ -218,19 +229,21 @@
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: all 0.3s;
+  transition: all 0.25s ease;
   position: relative;
   font-size: 24px;
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.28);
 }
 
 .card:hover {
   transform: translateY(-5px);
-  box-shadow: 0 10px 20px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.45);
 }
 
 .clickableCard {
   border: 3px solid #ffd700;
   animation: pulse 2s infinite;
+  box-shadow: 0 0 0 6px rgba(255, 215, 0, 0.18), 0 16px 36px rgba(0,0,0,0.45);
 }
 
 @keyframes pulse {
@@ -264,16 +277,18 @@
   align-items: center;
   justify-content: center;
   padding: 10px;
-  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.05), 0 4px 12px rgba(0, 0, 0, 0.28);
 }
 
 .cardBack {
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   border: 2px solid rgba(255, 255, 255, 0.3);
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.05), 0 4px 12px rgba(0,0,0,0.28);
 }
 
 .cardBackPattern {
   font-size: 40px;
+  filter: drop-shadow(0 2px 2px rgba(0,0,0,0.25));
 }
 
 .rank {
@@ -301,12 +316,13 @@
 }
 
 .specialInstruction {
-  background: rgba(255, 215, 0, 0.2);
-  border: 1px solid rgba(255, 215, 0, 0.6);
-  border-radius: 8px;
+  background: rgba(255, 215, 0, 0.15);
+  border: 1px solid rgba(255, 215, 0, 0.45);
+  border-radius: 12px;
   padding: 12px 16px;
-  max-width: 400px;
+  max-width: 520px;
   text-align: center;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.25);
 }
 
 .secondaryHint {
@@ -360,6 +376,13 @@
   width: 100%;
   height: 75vh;
   display: block;
+  border-radius: 24px;
+  box-shadow: inset 0 0 140px rgba(0, 0, 0, 0.45), 0 20px 50px rgba(0,0,0,0.45);
+  background:
+    radial-gradient(500px 250px at 50% 50%, rgba(255, 255, 255, 0.05), transparent 60%),
+    radial-gradient(800px 400px at 50% 50%, rgba(0,0,0,0.25), transparent 70%);
+  outline: 2px solid rgba(255,255,255,0.06);
+  outline-offset: -8px;
 }
 
 .discardCenter {
@@ -368,6 +391,7 @@
   left: 50%;
   transform: translate(-50%, -50%);
   z-index: 2; /* above players ring */
+  filter: drop-shadow(0 12px 24px rgba(0,0,0,0.35));
 }
 
 .playersRing {
@@ -506,9 +530,14 @@
 }
 
 .results {
-  max-width: 600px;
+  max-width: 640px;
   width: 100%;
   text-align: center;
+  background: rgba(255,255,255,0.1);
+  border-radius: 16px;
+  padding: 24px;
+  border: 1px solid rgba(255,255,255,0.12);
+  box-shadow: 0 16px 40px rgba(0,0,0,0.35);
 }
 
 .scoreboard {
@@ -520,23 +549,49 @@
 
 .scoreItem {
   background: rgba(255, 255, 255, 0.2);
-  padding: 20px;
+  padding: 12px 16px;
   border-radius: 12px;
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: 40px 1fr auto auto;
   align-items: center;
-  backdrop-filter: blur(10px);
+  gap: 10px;
+  text-align: left;
 }
 
 .rank {
-  font-size: 1.5rem;
-  font-weight: bold;
+  font-size: 1.3rem;
+  font-weight: 800;
 }
 
 .winner {
   color: #ffd700;
-  font-weight: bold;
-  font-size: 1.2rem;
+  text-shadow: 0 1px 6px rgba(0,0,0,0.35);
+}
+
+/* Mobile tweaks */
+@media (max-width: 640px) {
+  .gameHeader h1 {
+    font-size: 2.2rem;
+  }
+  .card {
+    width: 64px;
+    height: 96px;
+    font-size: 20px;
+  }
+  .myGrid,
+  .opponentGrid {
+    grid-template-columns: repeat(2, 64px);
+    grid-template-rows: repeat(2, 96px);
+    gap: 6px;
+  }
+  .penaltyCard {
+    width: 52px;
+    height: 78px;
+  }
+  .results {
+    max-width: 95%;
+    padding: 18px;
+  }
 }
 
 .stackError {
