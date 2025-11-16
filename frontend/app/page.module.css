@@ -154,6 +154,16 @@
   margin-bottom: 20px;
 }
 
+.myGrid,
+.opponentGrid {
+  display: grid;
+  grid-template-columns: repeat(2, 80px);
+  gap: 8px;
+  justify-content: center;
+  justify-items: center;
+  margin-bottom: 20px;
+}
+
 .card {
   width: 80px;
   height: 120px;
@@ -189,6 +199,12 @@
 .card.selected {
   border: 3px solid #ffd700;
   transform: translateY(-5px);
+}
+
+.swapSelected {
+  border: 3px dashed #ffd700;
+  transform: translateY(-5px);
+  box-shadow: 0 0 10px rgba(255, 215, 0, 0.5);
 }
 
 .cardFace {
@@ -238,6 +254,21 @@
   font-size: 16px;
 }
 
+.specialInstruction {
+  background: rgba(255, 215, 0, 0.2);
+  border: 1px solid rgba(255, 215, 0, 0.6);
+  border-radius: 8px;
+  padding: 12px 16px;
+  max-width: 400px;
+  text-align: center;
+}
+
+.secondaryHint {
+  font-size: 0.9rem;
+  color: rgba(255, 255, 255, 0.85);
+  margin-top: 8px;
+}
+
 .myTotal {
   text-align: center;
   font-size: 1.5rem;
@@ -276,6 +307,46 @@
   margin-bottom: 30px;
   width: 100%;
   max-width: 1200px;
+}
+
+.table {
+  position: relative;
+  width: 100%;
+  height: 75vh;
+  display: block;
+}
+
+.discardCenter {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 2; /* above players ring */
+}
+
+.playersRing {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none; /* don't block clicks to center */
+}
+
+.playerSeat {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  pointer-events: auto; /* re-enable clicks for player areas */
+}
+
+.swapOverlay {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+}
+
+.swapAnimCard {
+  transition: transform 0.5s ease;
+  box-shadow: 0 12px 24px rgba(0,0,0,0.25);
 }
 
 .discardPile {

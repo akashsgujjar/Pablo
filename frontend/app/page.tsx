@@ -34,12 +34,23 @@ export default function Home() {
   const [playerName, setPlayerName] = useState('')
   const [connected, setConnected] = useState(false)
   const [gameState, setGameState] = useState<GameState | null>(null)
-  const [selectedCardIndex, setSelectedCardIndex] = useState<number | null>(null)
   const [drawnCard, setDrawnCard] = useState<Card | null>(null)
   const [isDrawing, setIsDrawing] = useState(false)
   const [revealedCard, setRevealedCard] = useState<{ playerID: string; index: number; card: Card } | null>(null)
-  const [swapSelection, setSwapSelection] = useState<{ playerID: string; cardIndex: number } | null>(null)
-  const [selectedSpecialCard, setSelectedSpecialCard] = useState<string | null>(null)
+  const [specialAction, setSpecialAction] = useState<
+    | null
+    | { type: '7' }
+    | { type: '8' }
+    | { type: '9'; firstSelection?: { playerID: string; cardIndex: number } }
+  >(null)
+  const [swapAnim, setSwapAnim] = useState<
+    | null
+    | {
+        from: { playerID: string; index: number; rect: DOMRect }
+        to: { playerID: string; index: number; rect: DOMRect }
+        started: boolean
+      }
+  >(null)
   const wsRef = useRef<WebSocket | null>(null)
 
   useEffect(() => {
@@ -88,7 +99,7 @@ export default function Home() {
         }
 
         if (shouldClearSpecial) {
-          setSelectedSpecialCard(null)
+          setSpecialAction(null)
         }
         
         // Update drawn card if it exists for this player
@@ -144,7 +155,6 @@ export default function Home() {
     if (drawnCard) {
       sendMessage('swapCard', { cardIndex })
       setDrawnCard(null)
-      setSelectedCardIndex(null)
     }
   }
 
@@ -172,6 +182,100 @@ export default function Home() {
 
   const isRedSuit = (suit?: string): boolean => {
     return suit === 'hearts' || suit === 'diamonds'
+  }
+
+  const isSwapSelected = (playerId: string, cardIndex: number) =>
+    specialAction?.type === '9' &&
+    specialAction.firstSelection?.playerID === playerId &&
+    specialAction.firstSelection?.cardIndex === cardIndex
+
+  const handleSpecialSwapSelection = (selection: { playerID: string; cardIndex: number }) => {
+    if (specialAction?.type !== '9') return
+
+    if (!specialAction.firstSelection) {
+      setSpecialAction({ type: '9', firstSelection: selection })
+      return
+    }
+
+    const first = specialAction.firstSelection
+    if (first.playerID === selection.playerID && first.cardIndex === selection.cardIndex) {
+      return
+    }
+
+    handleUseSpecialCardFromDiscard('9', {
+      player1ID: first.playerID,
+      card1Index: first.cardIndex,
+      player2ID: selection.playerID,
+      card2Index: selection.cardIndex,
+    })
+    setSpecialAction(null)
+  }
+
+  const handleSkipSpecialCard = () => {
+    if (gameState?.pendingSpecialCard) {
+      sendMessage('skipSpecialCard', {})
+    }
+    setSpecialAction(null)
+  }
+
+  const getSpecialInstruction = () => {
+    if (!specialAction) return ''
+    switch (specialAction.type) {
+      case '7':
+        return 'Click one of your cards to peek at it.'
+      case '8':
+        return 'Click one of your opponents’ cards to spy on it.'
+      case '9':
+        return specialAction.firstSelection
+          ? 'Select another card to complete the swap.'
+          : 'Click any card on the table to select it for swapping.'
+      default:
+        return ''
+    }
+  }
+
+  const handleMyCardClick = (idx: number) => {
+    if (!isMyTurn) return
+
+    if (specialAction) {
+      if (specialAction.type === '7') {
+        handleUseSpecialCardFromDiscard('7', { targetIndex: idx })
+        setSpecialAction(null)
+        return
+      }
+
+      if (specialAction.type === '9') {
+        handleSpecialSwapSelection({ playerID, cardIndex: idx })
+        return
+      }
+
+      // Special action active but this card isn't valid target
+      return
+    }
+
+    if (drawnCard) {
+      handleSwapCard(idx)
+    }
+  }
+
+  const handleOpponentCardClick = (targetPlayerID: string, cardIndex: number) => {
+    if (!isMyTurn || !specialAction) return
+
+    if (specialAction.type === '8') {
+      handleUseSpecialCardFromDiscard('8', {
+        targetPlayerID,
+        targetIndex: cardIndex,
+      })
+      setSpecialAction(null)
+      return
+    }
+
+    if (specialAction.type === '9') {
+      handleSpecialSwapSelection({ playerID: targetPlayerID, cardIndex })
+      return
+    }
+
+    // For other special types, clicking opponent cards does nothing
   }
 
   const getPlayerTotal = (player: Player): number => {
@@ -240,10 +344,11 @@ export default function Home() {
 
       {gameState?.status === 'playing' && (
         <>
-          {/* Discard Pile and Special Card UI */}
-          <div className={styles.discardPileContainer}>
+          {/* Table: center discard pile with players around */}
+          <div className={styles.table}>
+            {/* Discard Pile Center */}
             {gameState.discardTop && (
-              <div className={styles.discardPile}>
+              <div className={`${styles.discardPile} ${styles.discardCenter}`}>
                 <h3>Discard Pile</h3>
                 <div
                   className={`${styles.card} ${
@@ -254,19 +359,15 @@ export default function Home() {
                       : ''
                   }`}
                   onClick={() => {
-                    console.log('Discard pile card clicked', {
-                      isMyTurn,
-                      discardTop: gameState.discardTop,
-                      rank: gameState.discardTop?.rank,
-                      pendingSpecial: gameState.pendingSpecialCard,
-                    })
                     if (
                       isMyTurn &&
                       gameState.discardTop &&
                       gameState.pendingSpecialCard === gameState.discardTop.rank
                     ) {
-                      console.log('Setting selectedSpecialCard to', gameState.discardTop.rank)
-                      setSelectedSpecialCard(gameState.discardTop.rank)
+                      const rank = gameState.discardTop.rank
+                      if (rank === '7' || rank === '8' || rank === '9') {
+                        setSpecialAction({ type: rank })
+                      }
                     }
                   }}
                   style={{
@@ -296,223 +397,154 @@ export default function Home() {
                     {isMyTurn &&
                       gameState.discardTop &&
                       gameState.pendingSpecialCard === gameState.discardTop.rank && (
-                      <div style={{ fontSize: '10px', marginTop: '5px', color: '#ffd700', fontWeight: 'bold' }}>✨ CLICK ✨</div>
-                    )}
+                        <div style={{ fontSize: '10px', marginTop: '5px', color: '#ffd700', fontWeight: 'bold' }}>
+                          ✨ CLICK ✨
+                        </div>
+                      )}
                   </div>
                 </div>
               </div>
             )}
 
-            {/* Special Card Actions - Shown when user clicks on special card in discard pile */}
+            {/* Swap animation overlay */}
+            {swapAnim && (
+              <div className={styles.swapOverlay}>
+                <div
+                  className={`${styles.card} ${styles.swapAnimCard}`}
+                  style={{
+                    position: 'fixed',
+                    top: swapAnim.from.rect.top,
+                    left: swapAnim.from.rect.left,
+                    width: swapAnim.from.rect.width,
+                    height: swapAnim.from.rect.height,
+                    transform: swapAnim.started
+                      ? `translate(${swapAnim.to.rect.left - swapAnim.from.rect.left}px, ${swapAnim.to.rect.top - swapAnim.from.rect.top}px)`
+                      : 'translate(0, 0)',
+                  }}
+                >
+                  <div className={styles.cardBackPattern}>🎴</div>
+                </div>
+                <div
+                  className={`${styles.card} ${styles.swapAnimCard}`}
+                  style={{
+                    position: 'fixed',
+                    top: swapAnim.to.rect.top,
+                    left: swapAnim.to.rect.left,
+                    width: swapAnim.to.rect.width,
+                    height: swapAnim.to.rect.height,
+                    transform: swapAnim.started
+                      ? `translate(${swapAnim.from.rect.left - swapAnim.to.rect.left}px, ${swapAnim.from.rect.top - swapAnim.to.rect.top}px)`
+                      : 'translate(0, 0)',
+                  }}
+                >
+                  <div className={styles.cardBackPattern}>🎴</div>
+                </div>
+              </div>
+            )}
             {isMyTurn &&
-              selectedSpecialCard &&
-              gameState?.discardTop &&
-              gameState.pendingSpecialCard === selectedSpecialCard &&
-              gameState.discardTop.rank === selectedSpecialCard && (
-              <div className={styles.specialCardMenu}>
-                <h3>✨ Special Card Power: {selectedSpecialCard} ✨</h3>
-                <button onClick={() => setSelectedSpecialCard(null)} className={styles.button} style={{ marginBottom: '10px' }}>
-                  Close
-                </button>
-                {selectedSpecialCard === '7' && (
-                  <div>
-                    <h4>Look at one of your cards:</h4>
-                    {[0, 1, 2, 3].map((idx) => (
-                      <button
-                        key={idx}
-                      onClick={() => {
-                        handleUseSpecialCardFromDiscard('7', { targetIndex: idx })
-                        setSelectedSpecialCard(null)
+              specialAction &&
+              gameState?.pendingSpecialCard === gameState?.discardTop?.rank && (
+                <div className={styles.specialInstruction}>
+                  <p>{getSpecialInstruction()}</p>
+                  {specialAction.type === '9' && specialAction.firstSelection && (
+                    <p className={styles.secondaryHint}>
+                      First card selected. Choose another card to complete the swap.
+                    </p>
+                  )}
+                  <button onClick={handleSkipSpecialCard} className={styles.button}>
+                    Skip Special Card
+                  </button>
+                </div>
+              )}
+            
+            {/* Players ring around the discard pile (other players) */}
+            <div className={styles.playersRing}>
+              {(() => {
+                const seatedPlayers = otherPlayers
+                const count = seatedPlayers.length
+                const radius = 220
+                return seatedPlayers.map((player, i) => {
+                  const angle = (2 * Math.PI * i) / (count || 1)
+                  const x = Math.cos(angle) * radius
+                  const y = Math.sin(angle) * radius
+                  return (
+                    <div
+                      key={player.id}
+                      className={styles.playerSeat}
+                      style={{
+                        top: `calc(50% + ${y}px)`,
+                        left: `calc(50% + ${x}px)`,
                       }}
-                        className={styles.button}
-                      >
-                        Card {idx + 1}
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {selectedSpecialCard === '8' && (
-                  <div>
-                    <h4>Look at someone else's card:</h4>
-                    {otherPlayers.map((player) => (
-                      <div key={player.id}>
-                        <h5>{player.name}</h5>
-                        {[0, 1, 2, 3].map((idx) => (
-                          <button
-                            key={idx}
-                            onClick={() => {
-                              handleUseSpecialCardFromDiscard('8', {
-                                targetPlayerID: player.id,
-                                targetIndex: idx,
-                              })
-                              setSelectedSpecialCard(null)
-                            }}
-                            className={styles.button}
-                          >
-                            Card {idx + 1}
-                          </button>
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {selectedSpecialCard === '9' && (
-                  <div>
-                    <h4>Swap any two cards:</h4>
-                    {!swapSelection ? (
-                      <div>
-                        <p>Select the first card to swap:</p>
-                        <div>
-                          <h5>Your cards:</h5>
-                          {[0, 1, 2, 3].map((idx) => (
-                            <button
+                    >
+                      <div className={styles.playerArea}>
+                        <h3>
+                          {player.name} {gameState.currentPlayer === player.id && '👈'}
+                        </h3>
+                        <div className={styles.opponentGrid}>
+                          {player.cards.map((card, idx) => (
+                            <div
                               key={idx}
-                              onClick={() => setSwapSelection({ playerID: playerID, cardIndex: idx })}
-                              className={styles.button}
+                      id={`card-${player.id}-${idx}`}
+                              className={`${styles.card} ${styles.cardBack} ${
+                                isSwapSelected(player.id, idx) ? styles.swapSelected : ''
+                              }`}
+                              onClick={() => handleOpponentCardClick(player.id, idx)}
+                              style={{
+                                cursor:
+                                  specialAction && (specialAction.type === '8' || specialAction.type === '9')
+                                    ? 'pointer'
+                                    : 'default',
+                              }}
                             >
-                              Your Card {idx + 1}
-                            </button>
+                              {card.faceUp && card.rank ? (
+                                <div className={styles.cardFace}>
+                                  <span className={styles.rank}>{card.rank}</span>
+                                  <span
+                                    className={`${styles.suit} ${
+                                      isRedSuit(card.suit) ? styles.redSuit : styles.blackSuit
+                                    }`}
+                                  >
+                                    {getSuitSymbol(card.suit)}
+                                  </span>
+                                </div>
+                              ) : (
+                                <div className={styles.cardBackPattern}>🎴</div>
+                              )}
+                            </div>
                           ))}
                         </div>
-                        {otherPlayers.map((player) => (
-                          <div key={player.id}>
-                            <h5>{player.name}'s cards:</h5>
-                            {[0, 1, 2, 3].map((idx) => (
-                              <button
-                                key={idx}
-                                onClick={() => setSwapSelection({ playerID: player.id, cardIndex: idx })}
-                                className={styles.button}
-                              >
-                                {player.name}'s Card {idx + 1}
-                              </button>
-                            ))}
-                          </div>
-                        ))}
                       </div>
-                    ) : (
-                      <div>
-                        <p>First card selected. Now select the second card:</p>
-                        <div>
-                          <h5>Your cards:</h5>
-                          {[0, 1, 2, 3].map((idx) => {
-                            const isSelected = swapSelection.playerID === playerID && swapSelection.cardIndex === idx
-                            return (
-                              <button
-                                key={idx}
-                                onClick={() => {
-                                  if (!isSelected) {
-                                    handleUseSpecialCardFromDiscard('9', {
-                                      player1ID: swapSelection.playerID,
-                                      card1Index: swapSelection.cardIndex,
-                                      player2ID: playerID,
-                                      card2Index: idx,
-                                    })
-                                    setSwapSelection(null)
-                                    setSelectedSpecialCard(null)
-                                  }
-                                }}
-                                className={styles.button}
-                                disabled={isSelected}
-                              >
-                                Your Card {idx + 1}
-                              </button>
-                            )
-                          })}
-                        </div>
-                        {otherPlayers.map((player) => (
-                          <div key={player.id}>
-                            <h5>{player.name}'s cards:</h5>
-                            {[0, 1, 2, 3].map((idx) => {
-                              const isSelected = swapSelection.playerID === player.id && swapSelection.cardIndex === idx
-                              return (
-                                <button
-                                  key={idx}
-                                  onClick={() => {
-                                    if (!isSelected) {
-                                      handleUseSpecialCardFromDiscard('9', {
-                                        player1ID: swapSelection.playerID,
-                                        card1Index: swapSelection.cardIndex,
-                                        player2ID: player.id,
-                                        card2Index: idx,
-                                      })
-                                      setSwapSelection(null)
-                                      setSelectedSpecialCard(null)
-                                    }
-                                  }}
-                                  className={styles.button}
-                                  disabled={isSelected}
-                                >
-                                  {player.name}'s Card {idx + 1}
-                                </button>
-                              )
-                            })}
-                          </div>
-                        ))}
-                        <button onClick={() => setSwapSelection(null)} className={styles.button}>
-                          Cancel Selection
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
-                <button onClick={() => {
-                  sendMessage('skipSpecialCard', {})
-                  setSwapSelection(null)
-                  setSelectedSpecialCard(null)
-                }} className={styles.button}>
-                  Skip Special Card
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* Other Players */}
-          <div className={styles.otherPlayers}>
-            {otherPlayers.map((player) => (
-              <div key={player.id} className={styles.playerArea}>
-                <h3>{player.name} {gameState.currentPlayer === player.id && '👈'}</h3>
-                <div className={styles.cardRow}>
-                  {player.cards.map((card, idx) => (
-                    <div
-                      key={idx}
-                      className={`${styles.card} ${styles.cardBack}`}
-                    >
-                      {card.faceUp && card.rank ? (
-                        <div className={styles.cardFace}>
-                          <span className={styles.rank}>{card.rank}</span>
-                          <span
-                            className={`${styles.suit} ${
-                              isRedSuit(card.suit) ? styles.redSuit : styles.blackSuit
-                            }`}
-                          >
-                            {getSuitSymbol(card.suit)}
-                          </span>
-                        </div>
-                      ) : (
-                        <div className={styles.cardBackPattern}>🎴</div>
-                      )}
                     </div>
-                  ))}
-                </div>
-              </div>
-            ))}
+                  )
+                })
+              })()}
+            </div>
           </div>
 
           {/* My Cards */}
           {myPlayer && (
             <div className={styles.myArea}>
               <h2>Your Cards {isMyTurn && '👈 Your Turn'}</h2>
-              <div className={styles.cardRow}>
+              <div className={styles.myGrid}>
                 {myPlayer.cards.map((card, idx) => {
                   const isSpecial = card.rank === '7' || card.rank === '8' || card.rank === '9'
                   return (
                     <div
                       key={idx}
-                      className={`${styles.card} ${card.faceUp ? styles.cardFace : styles.cardBack} ${selectedCardIndex === idx ? styles.selected : ''}`}
-                      onClick={() => {
-                        if (isMyTurn && drawnCard) {
-                          handleSwapCard(idx)
-                        }
+                      id={`card-${playerID}-${idx}`}
+                      className={`${styles.card} ${card.faceUp ? styles.cardFace : styles.cardBack} ${
+                        isSwapSelected(playerID, idx) ? styles.swapSelected : ''
+                      }`}
+                      onClick={() => handleMyCardClick(idx)}
+                      style={{
+                        cursor:
+                          specialAction
+                            ? specialAction.type === '7' || specialAction.type === '9'
+                              ? 'pointer'
+                              : 'default'
+                            : drawnCard
+                              ? 'pointer'
+                              : 'default',
                       }}
                     >
                       {card.faceUp || card.rank ? (
@@ -598,8 +630,13 @@ export default function Home() {
                 </div>
               )}
               {(() => {
-                const topIsSpecial = gameState?.discardTop && (gameState.discardTop.rank === '7' || gameState.discardTop.rank === '8' || gameState.discardTop.rank === '9')
-                const hasPendingSpecial = topIsSpecial && gameState?.pendingSpecialCard
+                const topIsSpecial = Boolean(
+                  gameState?.discardTop &&
+                    (gameState.discardTop.rank === '7' ||
+                      gameState.discardTop.rank === '8' ||
+                      gameState.discardTop.rank === '9')
+                )
+                const hasPendingSpecial = Boolean(topIsSpecial && gameState?.pendingSpecialCard)
                 return (
                   <>
                     <button onClick={handleCallPablo} className={styles.button} disabled={gameState?.pabloCalled || !!drawnCard || hasPendingSpecial}>
