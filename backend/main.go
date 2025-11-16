@@ -145,7 +145,16 @@ func (g *Game) DrawCard(playerID string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	if g.CurrentPlayer != playerID || len(g.Deck) == 0 {
+	if g.CurrentPlayer != playerID {
+		return false
+	}
+
+	// If the deck is empty, automatically end the round and game.
+	if len(g.Deck) == 0 {
+		// Only end the round if we're still in a playing state
+		if g.Status == "playing" {
+			g.EndRound()
+		}
 		return false
 	}
 
