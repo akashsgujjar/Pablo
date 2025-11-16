@@ -661,17 +661,9 @@ func (g *Game) StackCard(playerID string, cardIndex int) (bool, string) {
 	// Check if the card being stacked on is a special card (7, 8, 9)
 	isStackingOnSpecialCard := topCard.Rank == "7" || topCard.Rank == "8" || topCard.Rank == "9"
 	
-	// Remove card from player's hand - always remove from slice to make it visible to everyone
-	player.Cards = append(player.Cards[:cardIndex], player.Cards[cardIndex+1:]...)
-	
-	// If we removed one of the first 4 cards and there are penalty cards, move a penalty card up
-	// to maintain the visual 4-card structure
-	if cardIndex < 4 && len(player.Cards) >= 4 {
-		// The slice already has the card removed, so indices have shifted
-		// We want to keep the first 4 positions filled if possible
-		// Since we removed from index < 4, the card at old index 4 is now at index 3
-		// This is already handled by the slice removal above
-	}
+	// Replace the stacked card with an empty card to preserve positions
+	// This prevents other cards from shifting when a card is stacked
+	player.Cards[cardIndex] = Card{Suit: "", Rank: "", FaceUp: false}
 
 	// If stacking on a special card, add this player to the queue for special card activation
 	if isStackingOnSpecialCard {
@@ -771,23 +763,35 @@ func (g *Game) broadcastGameState() {
 func (g *Game) getGameStateForPlayer(viewerID string) map[string]interface{} {
 	players := make(map[string]interface{})
 	for id, player := range g.Players {
-		// Filter out empty cards - only include cards with rank or suit
-		var cards []Card
+		// Include ALL cards (including empty ones) to preserve positions
+		var cards []map[string]interface{}
 		for _, card := range player.Cards {
-			if card.Rank != "" || card.Suit != "" {
+			// Check if card is empty (removed via stacking)
+			if card.Rank == "" && card.Suit == "" {
+				// Include empty card as placeholder to maintain position
+				// Mark it as removed so frontend knows it's a stacked card, not a face-down card
+				cards = append(cards, map[string]interface{}{
+					"suit":   "",
+					"rank":   "",
+					"faceUp": false,
+					"removed": true, // Flag to indicate this card was removed via stacking
+				})
+			} else {
 				// Only show card details if it's the viewer's card, or if it's face up, or if game ended
 				if id == viewerID || card.FaceUp || g.Status == "ended" {
-					cards = append(cards, Card{
-						Suit:   card.Suit,
-						Rank:   card.Rank,
-						FaceUp: card.FaceUp || g.Status == "ended",
+					cards = append(cards, map[string]interface{}{
+						"suit":   card.Suit,
+						"rank":   card.Rank,
+						"faceUp": card.FaceUp || g.Status == "ended",
+						"removed": false,
 					})
 				} else {
-					// Hide other players' cards (face down)
-					cards = append(cards, Card{
-						Suit:   "",
-						Rank:   "",
-						FaceUp: false,
+					// Hide other players' cards (face down) - card exists but details hidden
+					cards = append(cards, map[string]interface{}{
+						"suit":   "",
+						"rank":   "",
+						"faceUp": false,
+						"removed": false, // Card exists, just hidden
 					})
 				}
 			}

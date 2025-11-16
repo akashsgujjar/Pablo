@@ -7,6 +7,7 @@ interface Card {
   suit: string
   rank: string
   faceUp: boolean
+  removed?: boolean // Flag to indicate if card was removed via stacking (vs just hidden face-down)
 }
 
 interface Player {
@@ -148,49 +149,80 @@ export default function Home() {
         setStackError(message.payload.message)
         setTimeout(() => setStackError(null), 3000)
       } else if (message.type === 'swapEvent') {
-        // Trigger swap animation for all players
+        // Trigger swap animation for ALL players (including observers)
         const { player1ID, card1Index, card1, player2ID, card2Index, card2 } = message.payload
         
-        // Get card positions immediately (before DOM updates with swapped cards)
-        // Use requestAnimationFrame to ensure we get positions before React re-renders
+        // Function to find and animate cards with retry logic
+        const triggerSwapAnimation = () => {
+          const card1El = document.getElementById(`card-${player1ID}-${card1Index}`)
+          const card2El = document.getElementById(`card-${player2ID}-${card2Index}`)
+          
+          if (card1El && card2El) {
+            const rect1 = card1El.getBoundingClientRect()
+            const rect2 = card2El.getBoundingClientRect()
+            
+            // Use card data from the payload (cards before swap)
+            setSwapAnim({
+              from: { playerID: player1ID, index: card1Index, rect: rect1, card: card1 },
+              to: { playerID: player2ID, index: card2Index, rect: rect2, card: card2 },
+              started: false
+            })
+            
+            // Start animation after a brief moment
+            setTimeout(() => {
+              setSwapAnim(prev => {
+                if (prev) {
+                  return { ...prev, started: true }
+                }
+                return null
+              })
+            }, 100)
+            
+            // Clear animation after it completes
+            setTimeout(() => {
+              setSwapAnim(null)
+            }, 1500)
+          } else {
+            // If cards not found, try again after a short delay
+            // This handles cases where gameState update hasn't rendered yet
+            setTimeout(() => {
+              const retryCard1El = document.getElementById(`card-${player1ID}-${card1Index}`)
+              const retryCard2El = document.getElementById(`card-${player2ID}-${card2Index}`)
+              
+              if (retryCard1El && retryCard2El) {
+                const rect1 = retryCard1El.getBoundingClientRect()
+                const rect2 = retryCard2El.getBoundingClientRect()
+                
+                setSwapAnim({
+                  from: { playerID: player1ID, index: card1Index, rect: rect1, card: card1 },
+                  to: { playerID: player2ID, index: card2Index, rect: rect2, card: card2 },
+                  started: false
+                })
+                
+                setTimeout(() => {
+                  setSwapAnim(prev => {
+                    if (prev) {
+                      return { ...prev, started: true }
+                    }
+                    return null
+                  })
+                }, 100)
+                
+                setTimeout(() => {
+                  setSwapAnim(null)
+                }, 1500)
+              }
+            }, 200)
+          }
+        }
+        
+        // Use multiple requestAnimationFrame calls to ensure DOM is ready
+        // This works for all players, including observers
         requestAnimationFrame(() => {
           requestAnimationFrame(() => {
-            const card1El = document.getElementById(`card-${player1ID}-${card1Index}`)
-            const card2El = document.getElementById(`card-${player2ID}-${card2Index}`)
-            
-            if (card1El && card2El) {
-              const rect1 = card1El.getBoundingClientRect()
-              const rect2 = card2El.getBoundingClientRect()
-              
-              // Use card data from the payload (cards before swap)
-              setSwapAnim({
-                from: { playerID: player1ID, index: card1Index, rect: rect1, card: card1 },
-                to: { playerID: player2ID, index: card2Index, rect: rect2, card: card2 },
-                started: false
-              })
-              
-              // Start animation after a brief moment
-              setTimeout(() => {
-                setSwapAnim(prev => {
-                  if (prev) {
-                    return { ...prev, started: true }
-                  }
-                  return null
-                })
-              }, 100)
-              
-              // Clear animation after it completes
-              setTimeout(() => {
-                setSwapAnim(null)
-              }, 1500)
-            } else {
-              console.warn('Could not find card elements for swap animation', {
-                card1Id: `card-${player1ID}-${card1Index}`,
-                card2Id: `card-${player2ID}-${card2Index}`,
-                card1El: !!card1El,
-                card2El: !!card2El,
-              })
-            }
+            requestAnimationFrame(() => {
+              triggerSwapAnimation()
+            })
           })
         })
       } else if (message.type === 'error') {
@@ -642,41 +674,112 @@ export default function Home() {
                         <h3>
                           {player.name} {gameState.currentPlayer === player.id && '👈'}
                         </h3>
-                        <div className={styles.opponentGrid}>
-                          {player.cards.map((card, idx) => {
-                            const hasStackAttempt = stackAttempts[player.id] !== undefined
-                            return (
-                            <div
-                              key={idx}
-                      id={`card-${player.id}-${idx}`}
-                              className={`${styles.card} ${styles.cardBack} ${
-                                isSwapSelected(player.id, idx) ? styles.swapSelected : ''
-                              } ${hasStackAttempt ? styles.stackAttemptCard : ''}`}
-                              onClick={() => handleOpponentCardClick(player.id, idx)}
-                              style={{
-                                cursor:
-                                  specialAction && (specialAction.type === '8' || specialAction.type === '9')
-                                    ? 'pointer'
-                                    : 'default',
-                              }}
-                            >
-                              {card.faceUp && card.rank ? (
-                                <div className={styles.cardFace}>
-                                  <span className={styles.rank}>{card.rank}</span>
-                                  <span
-                                    className={`${styles.suit} ${
-                                      isRedSuit(card.suit) ? styles.redSuit : styles.blackSuit
-                                    }`}
+                        <div className={styles.myCardsContainer}>
+                          <div className={styles.opponentGrid}>
+                            {Array.from({ length: 4 }, (_, idx) => {
+                              const card = player.cards[idx] || { rank: '', suit: '', faceUp: false, removed: false }
+                              // Calculate explicit grid position: row = Math.floor(idx / 2) + 1, col = (idx % 2) + 1
+                              const gridRow = Math.floor(idx / 2) + 1
+                              const gridCol = (idx % 2) + 1
+                              
+                              // For the first 4 cards: if card was removed via stacking, render as invisible placeholder
+                              if (card.removed) {
+                                return (
+                                  <div
+                                    key={idx}
+                                    id={`card-${player.id}-${idx}`}
+                                    className={styles.card}
+                                    style={{
+                                      visibility: 'hidden',
+                                      pointerEvents: 'none',
+                                      gridRow: gridRow,
+                                      gridColumn: gridCol,
+                                    }}
                                   >
-                                    {getSuitSymbol(card.suit)}
-                                  </span>
+                                    <div className={styles.cardBackPattern}>🎴</div>
+                                  </div>
+                                )
+                              }
+                              
+                              // Render actual cards (face-down or face-up)
+                              // - If rank/suit are empty but not removed, it's a face-down card (show card back)
+                              // - If rank/suit exist and faceUp, show card face
+                              // - If rank/suit exist but not faceUp, show card back
+                              const hasStackAttempt = stackAttempts[player.id] !== undefined
+                              return (
+                                <div
+                                  key={idx}
+                                  id={`card-${player.id}-${idx}`}
+                                  className={`${styles.card} ${styles.cardBack} ${
+                                    isSwapSelected(player.id, idx) ? styles.swapSelected : ''
+                                  } ${hasStackAttempt ? styles.stackAttemptCard : ''}`}
+                                  onClick={() => handleOpponentCardClick(player.id, idx)}
+                                  style={{
+                                    cursor:
+                                      specialAction && (specialAction.type === '8' || specialAction.type === '9')
+                                        ? 'pointer'
+                                        : 'default',
+                                    gridRow: gridRow,
+                                    gridColumn: gridCol,
+                                  }}
+                                >
+                                  {card.faceUp && card.rank ? (
+                                    <div className={styles.cardFace}>
+                                      <span className={styles.rank}>{card.rank}</span>
+                                      <span
+                                        className={`${styles.suit} ${
+                                          isRedSuit(card.suit) ? styles.redSuit : styles.blackSuit
+                                        }`}
+                                      >
+                                        {getSuitSymbol(card.suit)}
+                                      </span>
+                                    </div>
+                                  ) : (
+                                    <div className={styles.cardBackPattern}>🎴</div>
+                                  )}
                                 </div>
-                              ) : (
-                                <div className={styles.cardBackPattern}>🎴</div>
-                              )}
-                            </div>
+                              )
+                            })}
+                          </div>
+                          {(() => {
+                            // Only show penalty section if there are actual penalty cards (non-removed cards at index 4+)
+                            // For opponents, face-down cards have empty rank/suit but removed: false, so we check !removed
+                            const penaltyCards = player.cards.slice(4).filter(card => !card.removed)
+                            return penaltyCards.length > 0 && (
+                              <div className={styles.penaltyCardsContainer}>
+                                <div className={styles.penaltyLabel}>Penalty Cards</div>
+                                <div className={styles.penaltyCards}>
+                                  {player.cards.slice(4).map((card, idx) => {
+                                    const actualIdx = idx + 4
+                                    // Skip removed cards in penalty section
+                                    // Face-down cards (empty rank/suit but not removed) should still be shown as card backs
+                                    if (card.removed) {
+                                      return null
+                                    }
+                                    const hasStackAttempt = stackAttempts[player.id] !== undefined
+                                    return (
+                                      <div
+                                        key={actualIdx}
+                                        id={`card-${player.id}-${actualIdx}`}
+                                        className={`${styles.card} ${styles.penaltyCard} ${styles.cardBack} ${
+                                          isSwapSelected(player.id, actualIdx) ? styles.swapSelected : ''
+                                        } ${hasStackAttempt ? styles.stackAttemptCard : ''}`}
+                                        onClick={() => handleOpponentCardClick(player.id, actualIdx)}
+                                        style={{
+                                          cursor:
+                                            specialAction && (specialAction.type === '8' || specialAction.type === '9')
+                                              ? 'pointer'
+                                              : 'default',
+                                        }}
+                                      >
+                                        <div className={styles.cardBackPattern}>🎴</div>
+                                      </div>
+                                    )
+                                  })}
+                                </div>
+                              </div>
                             )
-                          })}
+                          })()}
                         </div>
                       </div>
                     </div>
@@ -692,11 +795,34 @@ export default function Home() {
               <h2>Your Cards {isMyTurn && '👈 Your Turn'}</h2>
               <div className={styles.myCardsContainer}>
                 <div className={styles.myGrid}>
-                  {myPlayer.cards.slice(0, Math.min(4, myPlayer.cards.length)).map((card, idx) => {
+                  {Array.from({ length: 4 }, (_, idx) => {
+                    const card = myPlayer.cards[idx] || { rank: '', suit: '', faceUp: false, removed: false }
+                    // Calculate explicit grid position: row = Math.floor(idx / 2) + 1, col = (idx % 2) + 1
+                    const gridRow = Math.floor(idx / 2) + 1
+                    const gridCol = (idx % 2) + 1
+                    
+                    // Render removed/empty cards as invisible placeholders to maintain positions
+                    if (card.removed || (!card.rank && !card.suit)) {
+                      return (
+                        <div
+                          key={`card-slot-${idx}`}
+                          id={`card-${playerID}-${idx}`}
+                          className={styles.card}
+                          style={{
+                            visibility: 'hidden',
+                            pointerEvents: 'none',
+                            gridRow: gridRow,
+                            gridColumn: gridCol,
+                          }}
+                        >
+                          <div className={styles.cardBackPattern}>🎴</div>
+                        </div>
+                      )
+                    }
                     const isSpecial = card.rank === '7' || card.rank === '8' || card.rank === '9'
                     return (
                       <div
-                        key={idx}
+                        key={`card-slot-${idx}`}
                         id={`card-${playerID}-${idx}`}
                         className={`${styles.card} ${card.faceUp ? styles.cardFace : styles.cardBack} ${
                           isSwapSelected(playerID, idx) ? styles.swapSelected : ''
@@ -706,6 +832,8 @@ export default function Home() {
                       title="Double-click to attempt stacking"
                       style={{
                         cursor: 'pointer',
+                        gridRow: gridRow,
+                        gridColumn: gridCol,
                       }}
                       >
                         {card.faceUp || card.rank ? (
@@ -727,12 +855,19 @@ export default function Home() {
                     )
                   })}
                 </div>
-                {myPlayer.cards.length > 4 && (
-                  <div className={styles.penaltyCardsContainer}>
-                    <div className={styles.penaltyLabel}>Penalty Cards</div>
-                    <div className={styles.penaltyCards}>
-                      {myPlayer.cards.slice(4).map((card, idx) => {
-                        const actualIdx = idx + 4
+                {(() => {
+                  // Only show penalty section if there are actual penalty cards (non-empty cards at index 4+)
+                  const penaltyCards = myPlayer.cards.slice(4).filter(card => card.rank || card.suit)
+                  return penaltyCards.length > 0 && (
+                    <div className={styles.penaltyCardsContainer}>
+                      <div className={styles.penaltyLabel}>Penalty Cards</div>
+                      <div className={styles.penaltyCards}>
+                        {myPlayer.cards.slice(4).map((card, idx) => {
+                          const actualIdx = idx + 4
+                          // Skip empty cards in penalty section - they shouldn't appear here
+                          if (!card.rank && !card.suit) {
+                            return null
+                          }
                         const isSpecial = card.rank === '7' || card.rank === '8' || card.rank === '9'
                         return (
                           <div
@@ -777,7 +912,8 @@ export default function Home() {
                       })}
                     </div>
                   </div>
-                )}
+                  )
+                })()}
               </div>
               <div className={styles.myTotal}>
                 Total: {getPlayerTotal(myPlayer)}
