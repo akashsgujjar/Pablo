@@ -30,9 +30,15 @@ type Game struct {
 	PabloCaller        string
 	StackableCardIndex int    // Index of the last card in discard pile that can be stacked on (placed via end turn, not via stacking)
 	StackedSpecialCardPlayers []string // Players who stacked on a special card, waiting for original player to complete
+	PendingGive        *PendingGive // When non-nil, actor must give one of their cards to target at targetIndex
 	mu                 sync.RWMutex
 }
 
+type PendingGive struct {
+	ActorID        string `json:"actorID"`
+	TargetPlayerID string `json:"targetPlayerID"`
+	TargetIndex    int    `json:"targetIndex"`
+}
 type Player struct {
 	ID    string
 	Name  string
@@ -68,6 +74,7 @@ func NewGame(id string) *Game {
 		PabloCaller:        "",
 		StackableCardIndex: -1, // -1 means no stackable card
 		StackedSpecialCardPlayers: []string{},
+		PendingGive:        nil,
 	}
 	shuffleDeck(game.Deck)
 	return game
@@ -158,6 +165,11 @@ func (g *Game) DrawCard(playerID string) bool {
 		return false
 	}
 
+	// Block draws while a pending give is active
+	if g.PendingGive != nil {
+		return false
+	}
+
 	// If the deck is empty, automatically end the round and game.
 	if len(g.Deck) == 0 {
 		// Only end the round if we're still in a playing state
@@ -188,6 +200,10 @@ func (g *Game) DiscardDrawnCard(playerID string) bool {
 	defer g.mu.Unlock()
 
 	if g.CurrentPlayer != playerID {
+		return false
+	}
+
+	if g.PendingGive != nil {
 		return false
 	}
 
@@ -225,6 +241,10 @@ func (g *Game) SwapCard(playerID string, cardIndex int) bool {
 	defer g.mu.Unlock()
 
 	if g.CurrentPlayer != playerID {
+		return false
+	}
+
+	if g.PendingGive != nil {
 		return false
 	}
 
@@ -271,6 +291,10 @@ func (g *Game) UseSpecialCardFromDiscard(playerID string, cardRank string, param
 	defer g.mu.Unlock()
 
 	if g.CurrentPlayer != playerID {
+		return false
+	}
+
+	if g.PendingGive != nil {
 		return false
 	}
 
@@ -380,6 +404,11 @@ func (g *Game) SkipSpecialCard(playerID string) {
 		return
 	}
 
+	// Can't skip while a give is pending
+	if g.PendingGive != nil {
+		return
+	}
+
 	// Clear the pending special card
 	g.PendingSpecialCard = ""
 	
@@ -417,6 +446,11 @@ func (g *Game) CallPablo(playerID string) {
 		return
 	}
 
+	// Can't call Pablo while a give is pending
+	if g.PendingGive != nil {
+		return
+	}
+
 	g.PabloCalled = true
 	g.PabloCaller = playerID
 	g.broadcastGameState()
@@ -427,6 +461,11 @@ func (g *Game) EndTurn(playerID string) {
 	defer g.mu.Unlock()
 
 	if g.CurrentPlayer != playerID {
+		return
+	}
+
+	// Must resolve pending give before ending turn
+	if g.PendingGive != nil {
 		return
 	}
 
@@ -487,6 +526,7 @@ func (g *Game) EndRound() {
 	g.Status = "ended"
 	g.PabloCalled = false
 	g.PabloCaller = ""
+	g.PendingGive = nil
 
 	// Reveal all cards
 	for _, player := range g.Players {
@@ -686,7 +726,101 @@ func (g *Game) StackCard(playerID string, cardIndex int) (bool, string) {
 	// Notify all players about the successful stack
 	g.broadcastStackAttempt(playerID, true)
 
+	// Check zero-card win condition for this player
+	if g.countNonEmptyCards(g.Players[playerID]) == 0 && g.Status == "playing" {
+		g.EndRound()
+		return true, ""
+	}
+
 	g.broadcastGameState()
+	return true, ""
+}
+
+// StackOpponentCard attempts to stack an opponent's card on top of discard pile by the acting player.
+// On success: opponent's card (at index) is placed on discard and their slot becomes empty (removed placeholder).
+// On failure (rank mismatch): that opponent card is moved as a penalty card to the acting player's hand
+// and the opponent's slot becomes empty (removed placeholder). Broadcasts a stackAttempt to all players.
+func (g *Game) StackOpponentCard(actorID string, targetPlayerID string, cardIndex int) (bool, string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	// Must have a top discard card
+	if len(g.DiscardPile) == 0 {
+		return false, "No card in discard pile to stack on."
+	}
+
+	// Only allow when the last placed card was via end turn (stackable)
+	topCardIndex := len(g.DiscardPile) - 1
+	if g.StackableCardIndex == -1 || g.StackableCardIndex != topCardIndex {
+		return false, "Cannot stack on this card right now."
+	}
+
+	actor, ok := g.Players[actorID]
+	if !ok {
+		return false, "Player not found."
+	}
+	target, ok := g.Players[targetPlayerID]
+	if !ok {
+		return false, "Target player not found."
+	}
+	if cardIndex < 0 || cardIndex >= len(target.Cards) {
+		return false, "Invalid card index."
+	}
+
+	topCard := g.DiscardPile[topCardIndex]
+	opCard := target.Cards[cardIndex]
+	if opCard.Rank == "" {
+		return false, "Invalid target card."
+	}
+
+	if opCard.Rank != topCard.Rank {
+		// Failure: move opponent's card to actor as a penalty; clear opponent slot
+		opCard.FaceUp = false
+		actor.Cards = append(actor.Cards, opCard)
+		target.Cards[cardIndex] = Card{Suit: "", Rank: "", FaceUp: false} // removed placeholder
+
+		// Notify and broadcast
+		g.broadcastStackAttempt(actorID, false)
+		// Check zero-card win condition for target (they lost a card)
+		if g.countNonEmptyCards(target) == 0 && g.Status == "playing" {
+			g.EndRound()
+			return false, "Card rank does not match. Opponent card taken as penalty."
+		}
+		g.broadcastGameState()
+		return false, "Card rank does not match. Opponent card taken as penalty."
+	}
+
+	// Success: stack opponent's card on discard; clear opponent slot
+	opCard.FaceUp = true
+	g.DiscardPile = append(g.DiscardPile, opCard)
+	target.Cards[cardIndex] = Card{Suit: "", Rank: "", FaceUp: false} // removed placeholder
+
+	// If stacking on special, queue actor for special resolution
+	isStackingOnSpecialCard := topCard.Rank == "7" || topCard.Rank == "8" || topCard.Rank == "9"
+	if isStackingOnSpecialCard {
+		alreadyQueued := false
+		for _, q := range g.StackedSpecialCardPlayers {
+			if q == actorID {
+				alreadyQueued = true
+				break
+			}
+		}
+		if !alreadyQueued {
+			g.StackedSpecialCardPlayers = append(g.StackedSpecialCardPlayers, actorID)
+		}
+	}
+
+	// New top came from stacking; prevent immediate re-stacking
+	g.StackableCardIndex = -1
+
+	g.broadcastStackAttempt(actorID, true)
+	// Set pending give: actor must give a card to target into this slot
+	g.PendingGive = &PendingGive{
+		ActorID:        actorID,
+		TargetPlayerID: targetPlayerID,
+		TargetIndex:    cardIndex,
+	}
+	g.broadcastGameState() // Frontend will prompt actor to give a card
 	return true, ""
 }
 
@@ -739,6 +873,21 @@ func (g *Game) broadcastSwapEventWithCards(player1ID string, card1Index int, car
 			player.Conn.WriteJSON(message)
 		}
 	}
+}
+
+// countNonEmptyCards returns how many cards in a player's hand actually exist
+// (i.e., have a non-empty rank). Placeholders created by stacking have empty rank/suit.
+func (g *Game) countNonEmptyCards(p *Player) int {
+	if p == nil {
+		return 0
+	}
+	count := 0
+	for _, c := range p.Cards {
+		if c.Rank != "" {
+			count++
+		}
+	}
+	return count
 }
 
 func (g *Game) sendToPlayer(playerID string, message Message) {
@@ -817,10 +966,10 @@ func (g *Game) getGameStateForPlayer(viewerID string) map[string]interface{} {
 		stackingEnabled = g.StackableCardIndex == topCardIndex
 	}
 
-	return map[string]interface{}{
+	state := map[string]interface{}{
 		"gameID":             g.ID,
 		"players":            players,
-		"currentPlayer":     g.CurrentPlayer,
+		"currentPlayer":      g.CurrentPlayer,
 		"status":             g.Status,
 		"pabloCalled":        g.PabloCalled,
 		"deckSize":           len(g.Deck),
@@ -829,8 +978,65 @@ func (g *Game) getGameStateForPlayer(viewerID string) map[string]interface{} {
 		"pendingSpecialCard": g.PendingSpecialCard,
 		"stackingEnabled":    stackingEnabled,
 	}
+	// Include pendingGive but only necessary fields for the viewer
+	if g.PendingGive != nil {
+		state["pendingGive"] = map[string]interface{}{
+			"actorID":        g.PendingGive.ActorID,
+			"targetPlayerID": g.PendingGive.TargetPlayerID,
+			"targetIndex":    g.PendingGive.TargetIndex,
+		}
+	}
+	return state
 }
 
+// HandleGiveCard moves a card from actor (PendingGive.ActorID) to target (PendingGive.TargetPlayerID) at TargetIndex.
+func (g *Game) HandleGiveCard(actorID string, sourceIndex int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.PendingGive == nil {
+		return
+	}
+	pg := g.PendingGive
+	if pg.ActorID != actorID {
+		return
+	}
+
+	actor, okA := g.Players[pg.ActorID]
+	target, okT := g.Players[pg.TargetPlayerID]
+	if !okA || !okT {
+		return
+	}
+	if sourceIndex < 0 || sourceIndex >= len(actor.Cards) {
+		return
+	}
+	// Card to give must be an existing card (non-empty)
+	card := actor.Cards[sourceIndex]
+	if card.Rank == "" {
+		return
+	}
+
+	// Place card into target at TargetIndex
+	if pg.TargetIndex < 0 || pg.TargetIndex >= len(target.Cards) {
+		return
+	}
+	target.Cards[pg.TargetIndex] = card
+	// Remove from actor (leave empty placeholder)
+	actor.Cards[sourceIndex] = Card{Suit: "", Rank: "", FaceUp: false}
+
+	// Clear pending give
+	g.PendingGive = nil
+
+	// If target now has zero cards (unlikely since we just gave), or actor now zero cards, check win
+	if g.Status == "playing" {
+		if g.countNonEmptyCards(actor) == 0 || g.countNonEmptyCards(target) == 0 {
+			g.EndRound()
+			return
+		}
+	}
+
+	g.broadcastGameState()
+}
 func getDiscardTop(discardPile []Card) *Card {
 	if len(discardPile) == 0 {
 		return nil
@@ -946,6 +1152,25 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					Payload: map[string]string{"message": errorMsg},
 				})
 			}
+
+		case "stackOpponentCard":
+			payload := msg.Payload.(map[string]interface{})
+			targetPlayerID := payload["targetPlayerID"].(string)
+			cardIndex := int(payload["cardIndex"].(float64))
+			game := gameManager.GetOrCreateGame(gameID)
+			success, errorMsg := game.StackOpponentCard(playerID, targetPlayerID, cardIndex)
+			if !success && errorMsg != "" {
+				conn.WriteJSON(Message{
+					Type:    "stackError",
+					Payload: map[string]string{"message": errorMsg},
+				})
+			}
+
+		case "giveCardToPlayer":
+			payload := msg.Payload.(map[string]interface{})
+			sourceIndex := int(payload["sourceIndex"].(float64))
+			game := gameManager.GetOrCreateGame(gameID)
+			game.HandleGiveCard(playerID, sourceIndex)
 		}
 	}
 }

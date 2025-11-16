@@ -1,8 +1,6 @@
 # Pablo Card Game
 
 ## TODO
-- stacking logic
-- swapping visuals
 - game appearance
 - seating arrangements based on number of players
 

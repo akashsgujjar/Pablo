@@ -28,6 +28,11 @@ interface GameState {
   drawnCards: { [key: string]: Card }
   pendingSpecialCard: string
   stackingEnabled: boolean
+  pendingGive?: {
+    actorID: string
+    targetPlayerID: string
+    targetIndex: number
+  }
 }
 
 export default function Home() {
@@ -365,6 +370,13 @@ export default function Home() {
 
   const handleMyCardClick = (idx: number) => {
     if (!isMyTurn) return
+    // Pending give: choose a card to give to target
+    if (gameState?.pendingGive && gameState.pendingGive.actorID === playerID) {
+      const card = myPlayer?.cards[idx]
+      if (!card || (!card.rank && !card.suit)) return // ignore empty placeholders
+      sendMessage('giveCardToPlayer', { sourceIndex: idx })
+      return
+    }
 
     if (specialAction) {
       if (specialAction.type === '7') {
@@ -635,6 +647,18 @@ export default function Home() {
                 </div>
               </div>
             )}
+            {/* Pending Give Instruction */}
+            {gameState?.pendingGive && gameState.pendingGive.actorID === playerID && (
+              <div className={styles.specialInstruction}>
+                <p>
+                  Choose one of your cards to give to{' '}
+                  {gameState.players[gameState.pendingGive.targetPlayerID]?.name || 'the player'}.
+                </p>
+                <p className={styles.secondaryHint}>
+                  It will go into their empty slot automatically.
+                </p>
+              </div>
+            )}
             {isMyTurn &&
               specialAction &&
               gameState?.pendingSpecialCard === gameState?.discardTop?.rank && (
@@ -714,11 +738,18 @@ export default function Home() {
                                     isSwapSelected(player.id, idx) ? styles.swapSelected : ''
                                   } ${hasStackAttempt ? styles.stackAttemptCard : ''}`}
                                   onClick={() => handleOpponentCardClick(player.id, idx)}
+                                  onDoubleClick={() => {
+                                    if (gameState?.stackingEnabled && !specialAction && !drawnCard && !card.faceUp && !card.removed) {
+                                      sendMessage('stackOpponentCard', { targetPlayerID: player.id, cardIndex: idx })
+                                    }
+                                  }}
                                   style={{
                                     cursor:
                                       specialAction && (specialAction.type === '8' || specialAction.type === '9')
                                         ? 'pointer'
-                                        : 'default',
+                                        : gameState?.stackingEnabled && !specialAction && !drawnCard && !card.faceUp && !card.removed
+                                          ? 'pointer'
+                                          : 'default',
                                     gridRow: gridRow,
                                     gridColumn: gridCol,
                                   }}
@@ -765,11 +796,18 @@ export default function Home() {
                                           isSwapSelected(player.id, actualIdx) ? styles.swapSelected : ''
                                         } ${hasStackAttempt ? styles.stackAttemptCard : ''}`}
                                         onClick={() => handleOpponentCardClick(player.id, actualIdx)}
+                                        onDoubleClick={() => {
+                                          if (gameState?.stackingEnabled && !specialAction && !drawnCard && !card.faceUp && !card.removed) {
+                                            sendMessage('stackOpponentCard', { targetPlayerID: player.id, cardIndex: actualIdx })
+                                          }
+                                        }}
                                         style={{
                                           cursor:
                                             specialAction && (specialAction.type === '8' || specialAction.type === '9')
                                               ? 'pointer'
-                                              : 'default',
+                                              : gameState?.stackingEnabled && !specialAction && !drawnCard && !card.faceUp && !card.removed
+                                                ? 'pointer'
+                                                : 'default',
                                         }}
                                       >
                                         <div className={styles.cardBackPattern}>🎴</div>
@@ -831,7 +869,10 @@ export default function Home() {
                       onDoubleClick={() => handleMyCardDoubleClick(idx)}
                       title="Double-click to attempt stacking"
                       style={{
-                        cursor: 'pointer',
+                        cursor:
+                          gameState?.pendingGive && gameState.pendingGive.actorID === playerID
+                            ? 'pointer'
+                            : 'pointer',
                         gridRow: gridRow,
                         gridColumn: gridCol,
                       }}
