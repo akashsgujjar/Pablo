@@ -47,8 +47,8 @@ export default function Home() {
   const [swapAnim, setSwapAnim] = useState<
     | null
     | {
-        from: { playerID: string; index: number; rect: DOMRect }
-        to: { playerID: string; index: number; rect: DOMRect }
+        from: { playerID: string; index: number; rect: DOMRect; card?: Card }
+        to: { playerID: string; index: number; rect: DOMRect; card?: Card }
         started: boolean
       }
   >(null)
@@ -147,6 +147,52 @@ export default function Home() {
       } else if (message.type === 'stackError') {
         setStackError(message.payload.message)
         setTimeout(() => setStackError(null), 3000)
+      } else if (message.type === 'swapEvent') {
+        // Trigger swap animation for all players
+        const { player1ID, card1Index, card1, player2ID, card2Index, card2 } = message.payload
+        
+        // Get card positions immediately (before DOM updates with swapped cards)
+        // Use requestAnimationFrame to ensure we get positions before React re-renders
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            const card1El = document.getElementById(`card-${player1ID}-${card1Index}`)
+            const card2El = document.getElementById(`card-${player2ID}-${card2Index}`)
+            
+            if (card1El && card2El) {
+              const rect1 = card1El.getBoundingClientRect()
+              const rect2 = card2El.getBoundingClientRect()
+              
+              // Use card data from the payload (cards before swap)
+              setSwapAnim({
+                from: { playerID: player1ID, index: card1Index, rect: rect1, card: card1 },
+                to: { playerID: player2ID, index: card2Index, rect: rect2, card: card2 },
+                started: false
+              })
+              
+              // Start animation after a brief moment
+              setTimeout(() => {
+                setSwapAnim(prev => {
+                  if (prev) {
+                    return { ...prev, started: true }
+                  }
+                  return null
+                })
+              }, 100)
+              
+              // Clear animation after it completes
+              setTimeout(() => {
+                setSwapAnim(null)
+              }, 1500)
+            } else {
+              console.warn('Could not find card elements for swap animation', {
+                card1Id: `card-${player1ID}-${card1Index}`,
+                card2Id: `card-${player2ID}-${card2Index}`,
+                card1El: !!card1El,
+                card2El: !!card2El,
+              })
+            }
+          })
+        })
       } else if (message.type === 'error') {
         alert(message.payload.message)
       }
@@ -465,8 +511,38 @@ export default function Home() {
             {/* Swap animation overlay */}
             {swapAnim && (
               <div className={styles.swapOverlay}>
+                {/* Connecting line between cards */}
+                <svg
+                  className={styles.swapLine}
+                  style={{
+                    position: 'fixed',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    height: '100%',
+                    pointerEvents: 'none',
+                    zIndex: 6,
+                  }}
+                >
+                  <line
+                    x1={swapAnim.started ? swapAnim.to.rect.left + swapAnim.to.rect.width / 2 : swapAnim.from.rect.left + swapAnim.from.rect.width / 2}
+                    y1={swapAnim.started ? swapAnim.to.rect.top + swapAnim.to.rect.height / 2 : swapAnim.from.rect.top + swapAnim.from.rect.height / 2}
+                    x2={swapAnim.started ? swapAnim.from.rect.left + swapAnim.from.rect.width / 2 : swapAnim.to.rect.left + swapAnim.to.rect.width / 2}
+                    y2={swapAnim.started ? swapAnim.from.rect.top + swapAnim.from.rect.height / 2 : swapAnim.to.rect.top + swapAnim.to.rect.height / 2}
+                    stroke="#ffd700"
+                    strokeWidth="4"
+                    strokeDasharray="10,5"
+                    opacity={swapAnim.started ? 0.8 : 0.4}
+                    style={{
+                      filter: 'drop-shadow(0 0 8px rgba(255, 215, 0, 0.8))',
+                      transition: 'all 0.6s ease',
+                    }}
+                  />
+                </svg>
+                
+                {/* First card (moving to second position) */}
                 <div
-                  className={`${styles.card} ${styles.swapAnimCard}`}
+                  className={`${styles.card} ${styles.swapAnimCard} ${styles.swapCardGlow}`}
                   style={{
                     position: 'fixed',
                     top: swapAnim.from.rect.top,
@@ -474,14 +550,30 @@ export default function Home() {
                     width: swapAnim.from.rect.width,
                     height: swapAnim.from.rect.height,
                     transform: swapAnim.started
-                      ? `translate(${swapAnim.to.rect.left - swapAnim.from.rect.left}px, ${swapAnim.to.rect.top - swapAnim.from.rect.top}px)`
-                      : 'translate(0, 0)',
+                      ? `translate(${swapAnim.to.rect.left - swapAnim.from.rect.left}px, ${swapAnim.to.rect.top - swapAnim.from.rect.top}px) scale(1.1)`
+                      : 'translate(0, 0) scale(1)',
+                    zIndex: 10,
                   }}
                 >
-                  <div className={styles.cardBackPattern}>🎴</div>
+                  {swapAnim.from.card && (swapAnim.from.card.faceUp || swapAnim.from.card.rank) ? (
+                    <div className={styles.cardFace}>
+                      <span className={styles.rank}>{swapAnim.from.card.rank}</span>
+                      <span
+                        className={`${styles.suit} ${
+                          isRedSuit(swapAnim.from.card.suit) ? styles.redSuit : styles.blackSuit
+                        }`}
+                      >
+                        {getSuitSymbol(swapAnim.from.card.suit)}
+                      </span>
+                    </div>
+                  ) : (
+                    <div className={styles.cardBackPattern}>🎴</div>
+                  )}
                 </div>
+                
+                {/* Second card (moving to first position) */}
                 <div
-                  className={`${styles.card} ${styles.swapAnimCard}`}
+                  className={`${styles.card} ${styles.swapAnimCard} ${styles.swapCardGlow}`}
                   style={{
                     position: 'fixed',
                     top: swapAnim.to.rect.top,
@@ -489,11 +581,25 @@ export default function Home() {
                     width: swapAnim.to.rect.width,
                     height: swapAnim.to.rect.height,
                     transform: swapAnim.started
-                      ? `translate(${swapAnim.from.rect.left - swapAnim.to.rect.left}px, ${swapAnim.from.rect.top - swapAnim.to.rect.top}px)`
-                      : 'translate(0, 0)',
+                      ? `translate(${swapAnim.from.rect.left - swapAnim.to.rect.left}px, ${swapAnim.from.rect.top - swapAnim.to.rect.top}px) scale(1.1)`
+                      : 'translate(0, 0) scale(1)',
+                    zIndex: 10,
                   }}
                 >
-                  <div className={styles.cardBackPattern}>🎴</div>
+                  {swapAnim.to.card && (swapAnim.to.card.faceUp || swapAnim.to.card.rank) ? (
+                    <div className={styles.cardFace}>
+                      <span className={styles.rank}>{swapAnim.to.card.rank}</span>
+                      <span
+                        className={`${styles.suit} ${
+                          isRedSuit(swapAnim.to.card.suit) ? styles.redSuit : styles.blackSuit
+                        }`}
+                      >
+                        {getSuitSymbol(swapAnim.to.card.suit)}
+                      </span>
+                    </div>
+                  ) : (
+                    <div className={styles.cardBackPattern}>🎴</div>
+                  )}
                 </div>
               </div>
             )}

@@ -329,8 +329,15 @@ func (g *Game) UseSpecialCardFromDiscard(playerID string, cardRank string, param
 					if card2Index, ok4 := params["card2Index"].(float64); ok4 {
 						idx1 := int(card1Index)
 						idx2 := int(card2Index)
-						if p1, exists1 := g.Players[player1ID]; exists1 && idx1 >= 0 && idx1 < 4 {
-							if p2, exists2 := g.Players[player2ID]; exists2 && idx2 >= 0 && idx2 < 4 {
+						if p1, exists1 := g.Players[player1ID]; exists1 && idx1 >= 0 && idx1 < len(p1.Cards) {
+							if p2, exists2 := g.Players[player2ID]; exists2 && idx2 >= 0 && idx2 < len(p2.Cards) {
+								// Capture card data BEFORE swap for animation
+								card1Before := p1.Cards[idx1]
+								card2Before := p2.Cards[idx2]
+								
+								// Broadcast swap event BEFORE swapping so frontend can capture original positions
+								g.broadcastSwapEventWithCards(player1ID, idx1, card1Before, player2ID, idx2, card2Before)
+								
 								// Swap the cards
 								p1.Cards[idx1], p2.Cards[idx2] = p2.Cards[idx2], p1.Cards[idx1]
 							}
@@ -708,6 +715,35 @@ func (g *Game) broadcastStackAttempt(playerID string, success bool) {
 					"success":    success,
 				},
 			}
+			player.Conn.WriteJSON(message)
+		}
+	}
+}
+
+// broadcastSwapEventWithCards notifies all players about a card swap with card data for animation
+func (g *Game) broadcastSwapEventWithCards(player1ID string, card1Index int, card1 Card, player2ID string, card2Index int, card2 Card) {
+	message := Message{
+		Type: "swapEvent",
+		Payload: map[string]interface{}{
+			"player1ID":  player1ID,
+			"card1Index": card1Index,
+			"card1": map[string]interface{}{
+				"suit":   card1.Suit,
+				"rank":   card1.Rank,
+				"faceUp": card1.FaceUp,
+			},
+			"player2ID":  player2ID,
+			"card2Index": card2Index,
+			"card2": map[string]interface{}{
+				"suit":   card2.Suit,
+				"rank":   card2.Rank,
+				"faceUp": card2.FaceUp,
+			},
+		},
+	}
+
+	for _, player := range g.Players {
+		if player.Conn != nil {
 			player.Conn.WriteJSON(message)
 		}
 	}
