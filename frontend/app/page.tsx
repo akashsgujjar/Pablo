@@ -26,6 +26,7 @@ interface GameState {
   discardTop: Card | null
   drawnCards: { [key: string]: Card }
   pendingSpecialCard: string
+  stackingEnabled: boolean
 }
 
 export default function Home() {
@@ -51,6 +52,9 @@ export default function Home() {
         started: boolean
       }
   >(null)
+  const [stackError, setStackError] = useState<string | null>(null)
+  const [stackAttempts, setStackAttempts] = useState<{ [playerID: string]: { success: boolean; timestamp: number } }>({})
+  const [isConnecting, setIsConnecting] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
 
   useEffect(() => {
@@ -66,10 +70,22 @@ export default function Home() {
       return
     }
 
+    setIsConnecting(true)
     const ws = new WebSocket('ws://localhost:8080/ws')
     wsRef.current = ws
 
+    // Set a timeout for connection
+    const connectionTimeout = setTimeout(() => {
+      if (ws.readyState !== WebSocket.OPEN) {
+        ws.close()
+        setIsConnecting(false)
+        alert('Connection timeout. Make sure the backend server is running on port 8080.')
+      }
+    }, 5000)
+
     ws.onopen = () => {
+      clearTimeout(connectionTimeout)
+      setIsConnecting(false)
       setConnected(true)
       ws.send(JSON.stringify({
         type: 'join',
@@ -113,17 +129,47 @@ export default function Home() {
       } else if (message.type === 'cardRevealed') {
         setRevealedCard(message.payload)
         setTimeout(() => setRevealedCard(null), 3000)
+      } else if (message.type === 'stackAttempt') {
+        const { playerID: attemptPlayerID, success } = message.payload
+        // Show popup for all players (including the player who attempted)
+        setStackAttempts(prev => ({
+          ...prev,
+          [attemptPlayerID]: { success, timestamp: Date.now() }
+        }))
+        // Clear after animation duration
+        setTimeout(() => {
+          setStackAttempts(prev => {
+            const next = { ...prev }
+            delete next[attemptPlayerID]
+            return next
+          })
+        }, 3000)
+      } else if (message.type === 'stackError') {
+        setStackError(message.payload.message)
+        setTimeout(() => setStackError(null), 3000)
       } else if (message.type === 'error') {
         alert(message.payload.message)
       }
     }
 
     ws.onerror = (error) => {
+      clearTimeout(connectionTimeout)
+      setIsConnecting(false)
       console.error('WebSocket error:', error)
+      alert('Failed to connect to game server. Make sure the backend is running on port 8080.')
+      setConnected(false)
     }
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
+      clearTimeout(connectionTimeout)
+      setIsConnecting(false)
+      console.log('WebSocket closed:', event.code, event.reason)
       setConnected(false)
+      // Only show alert if it's not a normal closure (1000) and connection was established
+      if (event.code !== 1000 && event.code !== 1006) {
+        // 1006 is abnormal closure (connection failed), we already show error in onerror
+        alert('Connection to game server lost. Please try again.')
+      }
     }
   }
 
@@ -234,6 +280,11 @@ export default function Home() {
     }
   }
 
+  const handleStackCard = (cardIndex: number) => {
+    // Always allow attempt - backend will validate if stacking is possible
+    sendMessage('stackCard', { cardIndex })
+  }
+
   const handleMyCardClick = (idx: number) => {
     if (!isMyTurn) return
 
@@ -256,6 +307,11 @@ export default function Home() {
     if (drawnCard) {
       handleSwapCard(idx)
     }
+  }
+
+  const handleMyCardDoubleClick = (idx: number) => {
+    // Always allow double-click to attempt stacking - backend will validate
+    handleStackCard(idx)
   }
 
   const handleOpponentCardClick = (targetPlayerID: string, cardIndex: number) => {
@@ -305,8 +361,8 @@ export default function Home() {
             onChange={(e) => setGameID(e.target.value)}
             className={styles.input}
           />
-          <button onClick={connectWebSocket} className={styles.button}>
-            Join Game
+          <button onClick={connectWebSocket} className={styles.button} disabled={isConnecting}>
+            {isConnecting ? 'Connecting...' : 'Join Game'}
           </button>
         </div>
       </div>
@@ -481,13 +537,15 @@ export default function Home() {
                           {player.name} {gameState.currentPlayer === player.id && '👈'}
                         </h3>
                         <div className={styles.opponentGrid}>
-                          {player.cards.map((card, idx) => (
+                          {player.cards.map((card, idx) => {
+                            const hasStackAttempt = stackAttempts[player.id] !== undefined
+                            return (
                             <div
                               key={idx}
                       id={`card-${player.id}-${idx}`}
                               className={`${styles.card} ${styles.cardBack} ${
                                 isSwapSelected(player.id, idx) ? styles.swapSelected : ''
-                              }`}
+                              } ${hasStackAttempt ? styles.stackAttemptCard : ''}`}
                               onClick={() => handleOpponentCardClick(player.id, idx)}
                               style={{
                                 cursor:
@@ -511,7 +569,8 @@ export default function Home() {
                                 <div className={styles.cardBackPattern}>🎴</div>
                               )}
                             </div>
-                          ))}
+                            )
+                          })}
                         </div>
                       </div>
                     </div>
@@ -525,46 +584,94 @@ export default function Home() {
           {myPlayer && (
             <div className={styles.myArea}>
               <h2>Your Cards {isMyTurn && '👈 Your Turn'}</h2>
-              <div className={styles.myGrid}>
-                {myPlayer.cards.map((card, idx) => {
-                  const isSpecial = card.rank === '7' || card.rank === '8' || card.rank === '9'
-                  return (
-                    <div
-                      key={idx}
-                      id={`card-${playerID}-${idx}`}
-                      className={`${styles.card} ${card.faceUp ? styles.cardFace : styles.cardBack} ${
-                        isSwapSelected(playerID, idx) ? styles.swapSelected : ''
-                      }`}
+              <div className={styles.myCardsContainer}>
+                <div className={styles.myGrid}>
+                  {myPlayer.cards.slice(0, Math.min(4, myPlayer.cards.length)).map((card, idx) => {
+                    const isSpecial = card.rank === '7' || card.rank === '8' || card.rank === '9'
+                    return (
+                      <div
+                        key={idx}
+                        id={`card-${playerID}-${idx}`}
+                        className={`${styles.card} ${card.faceUp ? styles.cardFace : styles.cardBack} ${
+                          isSwapSelected(playerID, idx) ? styles.swapSelected : ''
+                      } ${gameState?.stackingEnabled ? styles.stackableCard : ''}`}
                       onClick={() => handleMyCardClick(idx)}
+                      onDoubleClick={() => handleMyCardDoubleClick(idx)}
+                      title="Double-click to attempt stacking"
                       style={{
-                        cursor:
-                          specialAction
-                            ? specialAction.type === '7' || specialAction.type === '9'
-                              ? 'pointer'
-                              : 'default'
-                            : drawnCard
-                              ? 'pointer'
-                              : 'default',
+                        cursor: 'pointer',
                       }}
-                    >
-                      {card.faceUp || card.rank ? (
-                        <div className={styles.cardFace}>
-                          <span className={styles.rank}>{card.rank}</span>
-                          <span
-                            className={`${styles.suit} ${
-                              isRedSuit(card.suit) ? styles.redSuit : styles.blackSuit
-                            }`}
+                      >
+                        {card.faceUp || card.rank ? (
+                          <div className={styles.cardFace}>
+                            <span className={styles.rank}>{card.rank}</span>
+                            <span
+                              className={`${styles.suit} ${
+                                isRedSuit(card.suit) ? styles.redSuit : styles.blackSuit
+                              }`}
+                            >
+                              {getSuitSymbol(card.suit)}
+                            </span>
+                            {isSpecial && <span className={styles.specialBadge}>✨</span>}
+                          </div>
+                        ) : (
+                          <div className={styles.cardBackPattern}>🎴</div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+                {myPlayer.cards.length > 4 && (
+                  <div className={styles.penaltyCardsContainer}>
+                    <div className={styles.penaltyLabel}>Penalty Cards</div>
+                    <div className={styles.penaltyCards}>
+                      {myPlayer.cards.slice(4).map((card, idx) => {
+                        const actualIdx = idx + 4
+                        const isSpecial = card.rank === '7' || card.rank === '8' || card.rank === '9'
+                        return (
+                          <div
+                            key={actualIdx}
+                            id={`card-${playerID}-${actualIdx}`}
+                            className={`${styles.card} ${styles.penaltyCard} ${card.faceUp ? styles.cardFace : styles.cardBack} ${
+                              isSwapSelected(playerID, actualIdx) ? styles.swapSelected : ''
+                            } ${gameState?.stackingEnabled && !specialAction && !drawnCard ? styles.stackableCard : ''}`}
+                            onClick={() => handleMyCardClick(actualIdx)}
+                            onDoubleClick={() => handleMyCardDoubleClick(actualIdx)}
+                            title="Double-click to attempt stacking"
+                            style={{
+                              cursor:
+                                specialAction
+                                  ? specialAction.type === '7' || specialAction.type === '9'
+                                    ? 'pointer'
+                                    : 'default'
+                                  : drawnCard
+                                    ? 'pointer'
+                                    : gameState?.stackingEnabled && !specialAction && !drawnCard
+                                      ? 'pointer'
+                                      : 'default',
+                            }}
                           >
-                            {getSuitSymbol(card.suit)}
-                          </span>
-                          {isSpecial && <span className={styles.specialBadge}>✨</span>}
-                        </div>
-                      ) : (
-                        <div className={styles.cardBackPattern}>🎴</div>
-                      )}
+                            {card.faceUp || card.rank ? (
+                              <div className={styles.cardFace}>
+                                <span className={styles.rank}>{card.rank}</span>
+                                <span
+                                  className={`${styles.suit} ${
+                                    isRedSuit(card.suit) ? styles.redSuit : styles.blackSuit
+                                  }`}
+                                >
+                                  {getSuitSymbol(card.suit)}
+                                </span>
+                                {isSpecial && <span className={styles.specialBadge}>✨</span>}
+                              </div>
+                            ) : (
+                              <div className={styles.cardBackPattern}>🎴</div>
+                            )}
+                          </div>
+                        )
+                      })}
                     </div>
-                  )
-                })}
+                  </div>
+                )}
               </div>
               <div className={styles.myTotal}>
                 Total: {getPlayerTotal(myPlayer)}
@@ -572,6 +679,37 @@ export default function Home() {
             </div>
           )}
 
+
+          {/* Stack Error Display */}
+          {stackError && (
+            <div className={styles.stackError}>
+              <div className={styles.stackErrorContent}>
+                <h3>❌ Stack Failed!</h3>
+                <p>{stackError}</p>
+              </div>
+            </div>
+          )}
+
+          {/* Stack Attempt Popups for All Players */}
+          {Object.entries(stackAttempts).map(([attemptPlayerID, attempt]) => {
+            const attemptPlayer = gameState?.players[attemptPlayerID]
+            if (!attemptPlayer) return null
+            return (
+              <div
+                key={attemptPlayerID}
+                className={`${styles.stackAttemptAnimation} ${
+                  attempt.success ? styles.stackSuccess : styles.stackFailure
+                }`}
+              >
+                <div className={styles.stackAttemptContent}>
+                  <h3>{attemptPlayer.name}</h3>
+                  <p>
+                    {attempt.success ? '✅ Successfully stacked!' : '❌ Failed to stack - penalty card added'}
+                  </p>
+                </div>
+              </div>
+            )
+          })}
 
           {/* Revealed Card Modal */}
           {revealedCard && (

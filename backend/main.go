@@ -28,13 +28,15 @@ type Game struct {
 	Status             string // "waiting", "playing", "ended"
 	PabloCalled        bool
 	PabloCaller        string
+	StackableCardIndex int    // Index of the last card in discard pile that can be stacked on (placed via end turn, not via stacking)
+	StackedSpecialCardPlayers []string // Players who stacked on a special card, waiting for original player to complete
 	mu                 sync.RWMutex
 }
 
 type Player struct {
 	ID    string
 	Name  string
-	Cards [4]Card
+	Cards []Card // Changed to slice to support variable number of cards
 	Conn  *websocket.Conn
 	Ready bool
 	Score int
@@ -64,6 +66,8 @@ func NewGame(id string) *Game {
 		CurrentPlayer:      "",
 		PabloCalled:        false,
 		PabloCaller:        "",
+		StackableCardIndex: -1, // -1 means no stackable card
+		StackedSpecialCardPlayers: []string{},
 	}
 	shuffleDeck(game.Deck)
 	return game
@@ -104,7 +108,7 @@ func (g *Game) AddPlayer(id, name string, conn *websocket.Conn) bool {
 	g.Players[id] = &Player{
 		ID:    id,
 		Name:  name,
-		Cards: [4]Card{},
+		Cards: make([]Card, 4),
 		Conn:  conn,
 		Ready: false,
 		Score: 0,
@@ -123,7 +127,10 @@ func (g *Game) StartGame() {
 	g.Status = "playing"
 
 	// Deal 4 cards to each player
+	// Ensure each player has exactly 4 cards
 	for playerID := range g.Players {
+		// Reset to exactly 4 empty cards first
+		g.Players[playerID].Cards = make([]Card, 4)
 		for i := 0; i < 4; i++ {
 			if len(g.Deck) > 0 {
 				g.Players[playerID].Cards[i] = g.Deck[0]
@@ -197,6 +204,9 @@ func (g *Game) DiscardDrawnCard(playerID string) bool {
 	// Clear drawn card
 	delete(g.DrawnCards, playerID)
 
+	// Mark this new card as stackable (placed via discard, not via stacking)
+	g.StackableCardIndex = len(g.DiscardPile) - 1
+
 	// If it's a special card, mark it as pending activation
 	if card.Rank == "7" || card.Rank == "8" || card.Rank == "9" {
 		g.PendingSpecialCard = card.Rank
@@ -223,7 +233,7 @@ func (g *Game) SwapCard(playerID string, cardIndex int) bool {
 		return false
 	}
 
-	if cardIndex < 0 || cardIndex >= 4 {
+	if cardIndex < 0 || cardIndex >= len(g.Players[playerID].Cards) {
 		return false
 	}
 
@@ -238,6 +248,9 @@ func (g *Game) SwapCard(playerID string, cardIndex int) bool {
 
 	// Clear drawn card
 	delete(g.DrawnCards, playerID)
+
+	// Mark this new card as stackable (placed via swap, not via stacking)
+	g.StackableCardIndex = len(g.DiscardPile) - 1
 
 	// If the discarded card is special, mark it as pending activation
 	if oldCard.Rank == "7" || oldCard.Rank == "8" || oldCard.Rank == "9" {
@@ -330,6 +343,24 @@ func (g *Game) UseSpecialCardFromDiscard(playerID string, cardRank string, param
 
 	// Clear the pending special card after use
 	g.PendingSpecialCard = ""
+	
+	// Check if there are players who stacked on this special card
+	// They should get the special card power now
+	if len(g.StackedSpecialCardPlayers) > 0 {
+		// Get the first player who stacked (FIFO queue)
+		stackedPlayerID := g.StackedSpecialCardPlayers[0]
+		g.StackedSpecialCardPlayers = g.StackedSpecialCardPlayers[1:]
+		
+		// Set them as the current player and reactivate the special card
+		// This will allow them to use the special card power
+		if _, exists := g.Players[stackedPlayerID]; exists {
+			g.CurrentPlayer = stackedPlayerID
+			g.PendingSpecialCard = cardRank
+			g.broadcastGameState()
+			return true
+		}
+	}
+	
 	g.broadcastGameState()
 	return true
 }
@@ -344,6 +375,30 @@ func (g *Game) SkipSpecialCard(playerID string) {
 
 	// Clear the pending special card
 	g.PendingSpecialCard = ""
+	
+	// Check if there are players who stacked on this special card
+	// They should get the special card power now
+	if len(g.StackedSpecialCardPlayers) > 0 {
+		// Get the first player who stacked (FIFO queue)
+		stackedPlayerID := g.StackedSpecialCardPlayers[0]
+		g.StackedSpecialCardPlayers = g.StackedSpecialCardPlayers[1:]
+		
+		// Set them as the current player and reactivate the special card
+		// This will allow them to use the special card power
+		if _, exists := g.Players[stackedPlayerID]; exists {
+			g.CurrentPlayer = stackedPlayerID
+			// Get the special card rank from the discard pile
+			if len(g.DiscardPile) > 0 {
+				topCard := g.DiscardPile[len(g.DiscardPile)-1]
+				if topCard.Rank == "7" || topCard.Rank == "8" || topCard.Rank == "9" {
+					g.PendingSpecialCard = topCard.Rank
+				}
+			}
+			g.broadcastGameState()
+			return
+		}
+	}
+	
 	g.broadcastGameState()
 }
 
@@ -493,6 +548,171 @@ func getCardValue(card Card) int {
 	return value
 }
 
+// getNumericRank returns the numeric value of a card rank for comparison
+// Returns -1 if the rank doesn't have a numeric value (face cards)
+func getNumericRank(rank string) int {
+	switch rank {
+	case "A":
+		return 1
+	case "2":
+		return 2
+	case "3":
+		return 3
+	case "4":
+		return 4
+	case "5":
+		return 5
+	case "6":
+		return 6
+	case "7":
+		return 7
+	case "8":
+		return 8
+	case "9":
+		return 9
+	case "10":
+		return 10
+	default:
+		return -1 // Face cards (J, Q, K) don't have numeric values for stacking
+	}
+}
+
+// StackCard attempts to stack a player's card on top of the discard pile
+// Returns: (success bool, error message string)
+func (g *Game) StackCard(playerID string, cardIndex int) (bool, string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	// Check if discard pile has a card
+	if len(g.DiscardPile) == 0 {
+		return false, "No card in discard pile to stack on."
+	}
+
+	// Check if the top card is stackable (not placed via stacking)
+	// Stacking is allowed if the top card was placed via end turn
+	// StackableCardIndex tracks the index of the last card placed via end turn (not via stacking)
+	// If StackableCardIndex == -1, it means the top card was placed via stacking, so no stacking allowed
+	// If StackableCardIndex != topCardIndex, it means the top card is not the stackable one
+	topCardIndex := len(g.DiscardPile) - 1
+	
+	// Stacking is only allowed if the top card was placed via end turn (not via stacking)
+	// This means StackableCardIndex must match topCardIndex
+	if g.StackableCardIndex == -1 {
+		return false, "Cannot stack on this card. Cards placed via stacking cannot be stacked on."
+	}
+	if g.StackableCardIndex != topCardIndex {
+		return false, "Cannot stack on this card. Only the most recent card placed via end turn can be stacked on."
+	}
+
+	// Check if player exists
+	player, exists := g.Players[playerID]
+	if !exists {
+		return false, "Player not found."
+	}
+
+	// Check if card index is valid
+	if cardIndex < 0 || cardIndex >= len(player.Cards) {
+		return false, "Invalid card index."
+	}
+
+	// Get the card to stack
+	cardToStack := player.Cards[cardIndex]
+	if cardToStack.Rank == "" {
+		return false, "Invalid card. Card has no rank."
+	}
+
+	// Get the top card of discard pile
+	topCard := g.DiscardPile[topCardIndex]
+	if topCard.Rank == "" {
+		return false, "Invalid discard pile card. Card has no rank."
+	}
+
+	// Check if ranks match (any rank can stack, including face cards J, Q, K)
+	// Suit doesn't matter, only the rank/number needs to match
+	if cardToStack.Rank != topCard.Rank {
+		// Stack failed - add penalty card
+		if len(g.Deck) > 0 {
+			penaltyCard := g.Deck[0]
+			g.Deck = g.Deck[1:]
+			penaltyCard.FaceUp = false
+			player.Cards = append(player.Cards, penaltyCard)
+		}
+
+		// Immediately broadcast updated game state with penalty card
+		g.broadcastGameState()
+
+		// Notify all players about the failed stack attempt
+		g.broadcastStackAttempt(playerID, false)
+
+		return false, "Card rank does not match. Penalty card added."
+	}
+
+	// Stack successful - remove card from player and add to discard pile
+	cardToStack.FaceUp = true
+	g.DiscardPile = append(g.DiscardPile, cardToStack)
+
+	// Check if the card being stacked on is a special card (7, 8, 9)
+	isStackingOnSpecialCard := topCard.Rank == "7" || topCard.Rank == "8" || topCard.Rank == "9"
+	
+	// Remove card from player's hand - always remove from slice to make it visible to everyone
+	player.Cards = append(player.Cards[:cardIndex], player.Cards[cardIndex+1:]...)
+	
+	// If we removed one of the first 4 cards and there are penalty cards, move a penalty card up
+	// to maintain the visual 4-card structure
+	if cardIndex < 4 && len(player.Cards) >= 4 {
+		// The slice already has the card removed, so indices have shifted
+		// We want to keep the first 4 positions filled if possible
+		// Since we removed from index < 4, the card at old index 4 is now at index 3
+		// This is already handled by the slice removal above
+	}
+
+	// If stacking on a special card, add this player to the queue for special card activation
+	if isStackingOnSpecialCard {
+		// Only add if not already in the queue
+		alreadyQueued := false
+		for _, queuedID := range g.StackedSpecialCardPlayers {
+			if queuedID == playerID {
+				alreadyQueued = true
+				break
+			}
+		}
+		if !alreadyQueued {
+			g.StackedSpecialCardPlayers = append(g.StackedSpecialCardPlayers, playerID)
+		}
+	}
+
+	// Mark that the new top card (placed via stacking) cannot be stacked on
+	g.StackableCardIndex = -1
+
+	// Notify all players about the successful stack
+	g.broadcastStackAttempt(playerID, true)
+
+	g.broadcastGameState()
+	return true, ""
+}
+
+// broadcastStackAttempt notifies all players about a stack attempt
+func (g *Game) broadcastStackAttempt(playerID string, success bool) {
+	playerName := ""
+	if player, exists := g.Players[playerID]; exists {
+		playerName = player.Name
+	}
+
+	for _, player := range g.Players {
+		if player.Conn != nil {
+			message := Message{
+				Type: "stackAttempt",
+				Payload: map[string]interface{}{
+					"playerID":   playerID,
+					"playerName": playerName,
+					"success":    success,
+				},
+			}
+			player.Conn.WriteJSON(message)
+		}
+	}
+}
+
 func (g *Game) sendToPlayer(playerID string, message Message) {
 	if player, exists := g.Players[playerID]; exists && player.Conn != nil {
 		player.Conn.WriteJSON(message)
@@ -515,23 +735,24 @@ func (g *Game) broadcastGameState() {
 func (g *Game) getGameStateForPlayer(viewerID string) map[string]interface{} {
 	players := make(map[string]interface{})
 	for id, player := range g.Players {
-		cards := make([]Card, 4)
-		for i, card := range player.Cards {
-			if card.Rank != "" {
+		// Filter out empty cards - only include cards with rank or suit
+		var cards []Card
+		for _, card := range player.Cards {
+			if card.Rank != "" || card.Suit != "" {
 				// Only show card details if it's the viewer's card, or if it's face up, or if game ended
 				if id == viewerID || card.FaceUp || g.Status == "ended" {
-					cards[i] = Card{
+					cards = append(cards, Card{
 						Suit:   card.Suit,
 						Rank:   card.Rank,
 						FaceUp: card.FaceUp || g.Status == "ended",
-					}
+					})
 				} else {
-					// Hide other players' cards
-					cards[i] = Card{
+					// Hide other players' cards (face down)
+					cards = append(cards, Card{
 						Suit:   "",
 						Rank:   "",
 						FaceUp: false,
-					}
+					})
 				}
 			}
 		}
@@ -549,16 +770,24 @@ func (g *Game) getGameStateForPlayer(viewerID string) map[string]interface{} {
 		drawnCards[viewerID] = drawnCard
 	}
 
+	// Check if stacking is enabled (top card is stackable)
+	stackingEnabled := false
+	if len(g.DiscardPile) > 0 {
+		topCardIndex := len(g.DiscardPile) - 1
+		stackingEnabled = g.StackableCardIndex == topCardIndex
+	}
+
 	return map[string]interface{}{
 		"gameID":             g.ID,
 		"players":            players,
-		"currentPlayer":      g.CurrentPlayer,
+		"currentPlayer":     g.CurrentPlayer,
 		"status":             g.Status,
 		"pabloCalled":        g.PabloCalled,
 		"deckSize":           len(g.Deck),
 		"discardTop":         getDiscardTop(g.DiscardPile),
 		"drawnCards":         drawnCards,
 		"pendingSpecialCard": g.PendingSpecialCard,
+		"stackingEnabled":    stackingEnabled,
 	}
 }
 
@@ -664,6 +893,19 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		case "endTurn":
 			game := gameManager.GetOrCreateGame(gameID)
 			game.EndTurn(playerID)
+
+		case "stackCard":
+			payload := msg.Payload.(map[string]interface{})
+			cardIndex := int(payload["cardIndex"].(float64))
+			game := gameManager.GetOrCreateGame(gameID)
+			success, errorMsg := game.StackCard(playerID, cardIndex)
+			if !success {
+				// Send error message to the player who attempted to stack
+				conn.WriteJSON(Message{
+					Type:    "stackError",
+					Payload: map[string]string{"message": errorMsg},
+				})
+			}
 		}
 	}
 }
