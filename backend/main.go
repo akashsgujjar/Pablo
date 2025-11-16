@@ -17,30 +17,32 @@ var upgrader = websocket.Upgrader{
 }
 
 type Game struct {
-	ID            string
-	Players       map[string]*Player
-	Deck          []Card
-	DiscardPile   []Card
-	DrawnCards    map[string]*Card // Track drawn card per player
-	CurrentPlayer string
-	Status        string // "waiting", "playing", "ended"
-	PabloCalled   bool
-	mu            sync.RWMutex
+	ID                 string
+	Players            map[string]*Player
+	Deck               []Card
+	DiscardPile        []Card
+	DrawnCards         map[string]*Card // Track drawn card per player
+	HasDrawnThisTurn   map[string]bool  // Track if player has drawn this turn
+	PendingSpecialCard string           // Track if a special card was just discarded and needs activation
+	CurrentPlayer      string
+	Status             string // "waiting", "playing", "ended"
+	PabloCalled        bool
+	mu                 sync.RWMutex
 }
 
 type Player struct {
-	ID       string
-	Name     string
-	Cards    [4]Card
-	Conn     *websocket.Conn
-	Ready    bool
-	Score    int
+	ID    string
+	Name  string
+	Cards [4]Card
+	Conn  *websocket.Conn
+	Ready bool
+	Score int
 }
 
 type Card struct {
-	Suit string `json:"suit"` // "hearts", "diamonds", "clubs", "spades"
-	Rank string `json:"rank"` // "A", "2", "3", ..., "10", "J", "Q", "K"
-	FaceUp bool `json:"faceUp"`
+	Suit   string `json:"suit"` // "hearts", "diamonds", "clubs", "spades"
+	Rank   string `json:"rank"` // "A", "2", "3", ..., "10", "J", "Q", "K"
+	FaceUp bool   `json:"faceUp"`
 }
 
 type Message struct {
@@ -50,14 +52,16 @@ type Message struct {
 
 func NewGame(id string) *Game {
 	game := &Game{
-		ID:            id,
-		Players:       make(map[string]*Player),
-		Deck:          createDeck(),
-		DiscardPile:   []Card{},
-		DrawnCards:    make(map[string]*Card),
-		Status:        "waiting",
-		CurrentPlayer: "",
-		PabloCalled:  false,
+		ID:                 id,
+		Players:            make(map[string]*Player),
+		Deck:               createDeck(),
+		DiscardPile:        []Card{},
+		DrawnCards:         make(map[string]*Card),
+		HasDrawnThisTurn:   make(map[string]bool),
+		PendingSpecialCard: "",
+		Status:             "waiting",
+		CurrentPlayer:      "",
+		PabloCalled:        false,
 	}
 	shuffleDeck(game.Deck)
 	return game
@@ -66,7 +70,7 @@ func NewGame(id string) *Game {
 func createDeck() []Card {
 	suits := []string{"hearts", "diamonds", "clubs", "spades"}
 	ranks := []string{"A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"}
-	
+
 	deck := make([]Card, 0, 52)
 	for _, suit := range suits {
 		for _, rank := range ranks {
@@ -90,11 +94,11 @@ func shuffleDeck(deck []Card) {
 func (g *Game) AddPlayer(id, name string, conn *websocket.Conn) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	
+
 	if len(g.Players) >= 6 {
 		return false
 	}
-	
+
 	g.Players[id] = &Player{
 		ID:    id,
 		Name:  name,
@@ -109,13 +113,13 @@ func (g *Game) AddPlayer(id, name string, conn *websocket.Conn) bool {
 func (g *Game) StartGame() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	
+
 	if len(g.Players) < 2 {
 		return
 	}
-	
+
 	g.Status = "playing"
-	
+
 	// Deal 4 cards to each player
 	for playerID := range g.Players {
 		for i := 0; i < 4; i++ {
@@ -125,7 +129,7 @@ func (g *Game) StartGame() {
 			}
 		}
 	}
-	
+
 	// Set first player
 	firstPlayer := ""
 	for id := range g.Players {
@@ -133,24 +137,64 @@ func (g *Game) StartGame() {
 		break
 	}
 	g.CurrentPlayer = firstPlayer
-	
+
 	g.broadcastGameState()
 }
 
 func (g *Game) DrawCard(playerID string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	
+
 	if g.CurrentPlayer != playerID || len(g.Deck) == 0 {
 		return false
 	}
-	
+
+	// Can only draw one card per turn - check if they've already drawn this turn
+	if g.HasDrawnThisTurn[playerID] {
+		return false
+	}
+
 	// Draw card and show it to the player
 	card := g.Deck[0]
 	g.Deck = g.Deck[1:]
 	card.FaceUp = true
 	g.DrawnCards[playerID] = &card
-	
+	g.HasDrawnThisTurn[playerID] = true // Mark that they've drawn this turn
+
+	g.broadcastGameState()
+	return true
+}
+
+func (g *Game) DiscardDrawnCard(playerID string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.CurrentPlayer != playerID {
+		return false
+	}
+
+	drawnCard, hasDrawnCard := g.DrawnCards[playerID]
+	if !hasDrawnCard || drawnCard == nil {
+		return false
+	}
+
+	// Add drawn card to discard pile (face up so everyone can see)
+	card := *drawnCard
+	card.FaceUp = true
+	g.DiscardPile = append(g.DiscardPile, card)
+
+	// Clear drawn card
+	delete(g.DrawnCards, playerID)
+
+	// If it's a special card, mark it as pending activation
+	if card.Rank == "7" || card.Rank == "8" || card.Rank == "9" {
+		g.PendingSpecialCard = card.Rank
+		g.broadcastGameState()
+		return true
+	}
+
+	// Clear any pending special card if a non-special card was discarded
+	g.PendingSpecialCard = ""
 	g.broadcastGameState()
 	return true
 }
@@ -158,99 +202,102 @@ func (g *Game) DrawCard(playerID string) bool {
 func (g *Game) SwapCard(playerID string, cardIndex int) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	
+
 	if g.CurrentPlayer != playerID {
 		return false
 	}
-	
+
 	drawnCard, hasDrawnCard := g.DrawnCards[playerID]
 	if !hasDrawnCard || drawnCard == nil {
 		return false
 	}
-	
+
 	if cardIndex < 0 || cardIndex >= 4 {
 		return false
 	}
-	
+
 	// Swap the drawn card with player's card
 	oldCard := g.Players[playerID].Cards[cardIndex]
 	g.Players[playerID].Cards[cardIndex] = *drawnCard
 	g.Players[playerID].Cards[cardIndex].FaceUp = false // Hide it again after swap
+
+	// Add old card to discard pile (face up so everyone can see)
+	oldCard.FaceUp = true
 	g.DiscardPile = append(g.DiscardPile, oldCard)
-	
+
 	// Clear drawn card
 	delete(g.DrawnCards, playerID)
-	
+
+	// If the discarded card is special, mark it as pending activation
+	if oldCard.Rank == "7" || oldCard.Rank == "8" || oldCard.Rank == "9" {
+		g.PendingSpecialCard = oldCard.Rank
+		g.broadcastGameState()
+		return true
+	}
+
+	// Clear any pending special card if a non-special card was discarded
+	g.PendingSpecialCard = ""
 	g.broadcastGameState()
 	return true
 }
 
-func (g *Game) UseSpecialCard(playerID string, cardIndex int, action string, params map[string]interface{}) bool {
+// UseSpecialCardFromDiscard is called when a special card is placed in discard pile
+func (g *Game) UseSpecialCardFromDiscard(playerID string, cardRank string, params map[string]interface{}) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	
+
 	if g.CurrentPlayer != playerID {
 		return false
 	}
-	
-	card := g.Players[playerID].Cards[cardIndex]
-	
-	switch card.Rank {
+
+	// Check if the top card of discard pile is the special card
+	if len(g.DiscardPile) == 0 {
+		return false
+	}
+	topCard := g.DiscardPile[len(g.DiscardPile)-1]
+	if topCard.Rank != cardRank {
+		return false
+	}
+
+	// Also check pending flag for consistency
+	if g.PendingSpecialCard != cardRank {
+		return false
+	}
+
+	switch cardRank {
 	case "7": // Look at one of your own cards
 		if targetIndex, ok := params["targetIndex"].(float64); ok {
 			idx := int(targetIndex)
 			if idx >= 0 && idx < 4 {
-				// Reveal card temporarily to player
-				g.Players[playerID].Cards[idx].FaceUp = true
+				card := g.Players[playerID].Cards[idx]
 				g.sendToPlayer(playerID, Message{
 					Type: "cardRevealed",
 					Payload: map[string]interface{}{
 						"index": idx,
-						"card":  g.Players[playerID].Cards[idx],
+						"card":  card,
 					},
 				})
-				// Hide it again after a moment
-				go func() {
-					time.Sleep(3 * time.Second)
-					g.mu.Lock()
-					g.Players[playerID].Cards[idx].FaceUp = false
-					g.mu.Unlock()
-				}()
 			}
 		}
-		// Discard the 7
-		g.DiscardPile = append(g.DiscardPile, card)
-		g.Players[playerID].Cards[cardIndex] = Card{}
-		
+
 	case "8": // Look at someone else's card
 		if targetPlayerID, ok := params["targetPlayerID"].(string); ok {
 			if targetIndex, ok2 := params["targetIndex"].(float64); ok2 {
 				idx := int(targetIndex)
 				if targetPlayer, exists := g.Players[targetPlayerID]; exists && idx >= 0 && idx < 4 {
-					// Reveal card temporarily to player
-					targetPlayer.Cards[idx].FaceUp = true
+					card := targetPlayer.Cards[idx]
 					g.sendToPlayer(playerID, Message{
 						Type: "cardRevealed",
 						Payload: map[string]interface{}{
 							"playerID": targetPlayerID,
 							"index":    idx,
-							"card":     targetPlayer.Cards[idx],
+							"card":     card,
 						},
 					})
-					// Hide it again after a moment
-					go func() {
-						time.Sleep(3 * time.Second)
-						g.mu.Lock()
-						targetPlayer.Cards[idx].FaceUp = false
-						g.mu.Unlock()
-					}()
 				}
 			}
 		}
-		// Discard the 8
-		g.DiscardPile = append(g.DiscardPile, card)
-		g.Players[playerID].Cards[cardIndex] = Card{}
-		
+
 	case "9": // Swap any two cards on the table
 		if player1ID, ok := params["player1ID"].(string); ok {
 			if card1Index, ok2 := params["card1Index"].(float64); ok2 {
@@ -268,23 +315,35 @@ func (g *Game) UseSpecialCard(playerID string, cardIndex int, action string, par
 				}
 			}
 		}
-		// Discard the 9
-		g.DiscardPile = append(g.DiscardPile, card)
-		g.Players[playerID].Cards[cardIndex] = Card{}
 	}
-	
+
+	// Clear the pending special card after use
+	g.PendingSpecialCard = ""
 	g.broadcastGameState()
 	return true
+}
+
+func (g *Game) SkipSpecialCard(playerID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.CurrentPlayer != playerID {
+		return
+	}
+
+	// Clear the pending special card
+	g.PendingSpecialCard = ""
+	g.broadcastGameState()
 }
 
 func (g *Game) CallPablo(playerID string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	
+
 	if g.Status != "playing" || g.PabloCalled {
 		return
 	}
-	
+
 	g.PabloCalled = true
 	g.broadcastGameState()
 }
@@ -292,23 +351,32 @@ func (g *Game) CallPablo(playerID string) {
 func (g *Game) EndTurn(playerID string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	
+
 	if g.CurrentPlayer != playerID {
 		return
 	}
-	
-	// If player has a drawn card, discard it
-	if drawnCard, exists := g.DrawnCards[playerID]; exists && drawnCard != nil {
-		g.DiscardPile = append(g.DiscardPile, *drawnCard)
-		delete(g.DrawnCards, playerID)
+
+	// Player must handle drawn card (discard or swap) before ending turn
+	if _, hasDrawn := g.DrawnCards[playerID]; hasDrawn {
+		return // Can't end turn with a drawn card - must discard or swap first
 	}
-	
+
+	// Player must use special card power if one is in the discard pile
+	if len(g.DiscardPile) > 0 {
+		topCard := g.DiscardPile[len(g.DiscardPile)-1]
+		if topCard.Rank == "7" || topCard.Rank == "8" || topCard.Rank == "9" {
+			if g.PendingSpecialCard != "" {
+				return // Can't end turn with a pending special card - must use it or skip
+			}
+		}
+	}
+
 	// Move to next player
 	playerIDs := make([]string, 0, len(g.Players))
 	for id := range g.Players {
 		playerIDs = append(playerIDs, id)
 	}
-	
+
 	currentIdx := -1
 	for i, id := range playerIDs {
 		if id == playerID {
@@ -316,31 +384,37 @@ func (g *Game) EndTurn(playerID string) {
 			break
 		}
 	}
-	
+
 	if currentIdx >= 0 {
 		nextIdx := (currentIdx + 1) % len(playerIDs)
+		// Clear any drawn cards from the previous player (safety check)
+		delete(g.DrawnCards, playerID)
+		// Reset the "has drawn" flag for the previous player
+		delete(g.HasDrawnThisTurn, playerID)
+		// Reset the "has drawn" flag for the new current player (fresh turn)
 		g.CurrentPlayer = playerIDs[nextIdx]
+		delete(g.HasDrawnThisTurn, g.CurrentPlayer)
 	}
-	
+
 	// If Pablo was called, end the round
 	if g.PabloCalled {
 		g.EndRound()
 		return
 	}
-	
+
 	g.broadcastGameState()
 }
 
 func (g *Game) EndRound() {
 	g.Status = "ended"
-	
+
 	// Reveal all cards
 	for _, player := range g.Players {
 		for i := range player.Cards {
 			player.Cards[i].FaceUp = true
 		}
 	}
-	
+
 	// Calculate scores
 	for _, player := range g.Players {
 		score := 0
@@ -352,7 +426,7 @@ func (g *Game) EndRound() {
 		}
 		player.Score = score
 	}
-	
+
 	g.broadcastGameState()
 }
 
@@ -361,7 +435,7 @@ func getCardValue(card Card) int {
 	if card.Rank == "K" && (card.Suit == "hearts" || card.Suit == "diamonds") {
 		return -1
 	}
-	
+
 	// Face cards
 	if card.Rank == "J" || card.Rank == "Q" {
 		return 10
@@ -369,12 +443,12 @@ func getCardValue(card Card) int {
 	if card.Rank == "K" {
 		return 10
 	}
-	
+
 	// Ace
 	if card.Rank == "A" {
 		return 1
 	}
-	
+
 	// Number cards
 	value := 0
 	switch card.Rank {
@@ -397,7 +471,7 @@ func getCardValue(card Card) int {
 	case "10":
 		value = 10
 	}
-	
+
 	return value
 }
 
@@ -450,22 +524,23 @@ func (g *Game) getGameStateForPlayer(viewerID string) map[string]interface{} {
 			"score": player.Score,
 		}
 	}
-	
+
 	// Include drawn cards in state (only show your own drawn card)
 	drawnCards := make(map[string]*Card)
 	if drawnCard, exists := g.DrawnCards[viewerID]; exists && drawnCard != nil {
 		drawnCards[viewerID] = drawnCard
 	}
-	
+
 	return map[string]interface{}{
-		"gameID":        g.ID,
-		"players":       players,
-		"currentPlayer": g.CurrentPlayer,
-		"status":        g.Status,
-		"pabloCalled":   g.PabloCalled,
-		"deckSize":      len(g.Deck),
-		"discardTop":    getDiscardTop(g.DiscardPile),
-		"drawnCards":    drawnCards,
+		"gameID":             g.ID,
+		"players":            players,
+		"currentPlayer":      g.CurrentPlayer,
+		"status":             g.Status,
+		"pabloCalled":        g.PabloCalled,
+		"deckSize":           len(g.Deck),
+		"discardTop":         getDiscardTop(g.DiscardPile),
+		"drawnCards":         drawnCards,
+		"pendingSpecialCard": g.PendingSpecialCard,
 	}
 }
 
@@ -489,11 +564,11 @@ var gameManager = &GameManager{
 func (gm *GameManager) GetOrCreateGame(gameID string) *Game {
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
-	
+
 	if game, exists := gm.games[gameID]; exists {
 		return game
 	}
-	
+
 	game := NewGame(gameID)
 	gm.games[gameID] = game
 	return game
@@ -506,9 +581,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
-	
+
 	var playerID, gameID string
-	
+
 	for {
 		var msg Message
 		err := conn.ReadJSON(&msg)
@@ -516,14 +591,14 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			log.Println("Read error:", err)
 			break
 		}
-		
+
 		switch msg.Type {
 		case "join":
 			payload := msg.Payload.(map[string]interface{})
 			gameID = payload["gameID"].(string)
 			playerID = payload["playerID"].(string)
 			name := payload["name"].(string)
-			
+
 			game := gameManager.GetOrCreateGame(gameID)
 			if !game.AddPlayer(playerID, name, conn) {
 				conn.WriteJSON(Message{
@@ -532,35 +607,42 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			}
-			
+
 			game.broadcastGameState()
-			
+
 		case "startGame":
 			game := gameManager.GetOrCreateGame(gameID)
 			game.StartGame()
-			
+
 		case "drawCard":
 			game := gameManager.GetOrCreateGame(gameID)
 			game.DrawCard(playerID)
-			
+
+		case "discardDrawnCard":
+			game := gameManager.GetOrCreateGame(gameID)
+			game.DiscardDrawnCard(playerID)
+
 		case "swapCard":
 			payload := msg.Payload.(map[string]interface{})
 			cardIndex := int(payload["cardIndex"].(float64))
 			game := gameManager.GetOrCreateGame(gameID)
 			game.SwapCard(playerID, cardIndex)
-			
-		case "useSpecialCard":
+
+		case "useSpecialCardFromDiscard":
 			payload := msg.Payload.(map[string]interface{})
-			cardIndex := int(payload["cardIndex"].(float64))
-			action := payload["action"].(string)
+			cardRank := payload["cardRank"].(string)
 			params := payload["params"].(map[string]interface{})
 			game := gameManager.GetOrCreateGame(gameID)
-			game.UseSpecialCard(playerID, cardIndex, action, params)
-			
+			game.UseSpecialCardFromDiscard(playerID, cardRank, params)
+
+		case "skipSpecialCard":
+			game := gameManager.GetOrCreateGame(gameID)
+			game.SkipSpecialCard(playerID)
+
 		case "callPablo":
 			game := gameManager.GetOrCreateGame(gameID)
 			game.CallPablo(playerID)
-			
+
 		case "endTurn":
 			game := gameManager.GetOrCreateGame(gameID)
 			game.EndTurn(playerID)
@@ -570,8 +652,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	http.HandleFunc("/ws", handleWebSocket)
-	
+
 	log.Println("Server starting on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
-
