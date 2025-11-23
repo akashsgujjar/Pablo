@@ -68,3 +68,5 @@ The frontend runs on `http://localhost:3000`
 - Cosmetic Fixes
 - Fix giving card to someone after correctly stacking theirs
 - seating config based on number of players
+- refresh persistence
+- hosting infra
