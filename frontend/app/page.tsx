@@ -491,7 +491,15 @@ export default function Home() {
       {gameState?.status === 'playing' && (
         <>
           {/* Table: center discard pile with players around */}
-          <div className={styles.table}>
+          <div 
+            className={styles.table}
+            style={{
+              // Dynamically size table to contain all players
+              // Calculate based on max radius needed + player area size
+              minWidth: gameState ? `${Math.max(900, (Object.keys(gameState.players).length <= 2 ? 600 : Object.keys(gameState.players).length <= 4 ? 1200 : 1600))}px` : '900px',
+              minHeight: gameState ? `${Math.max(700, (Object.keys(gameState.players).length <= 2 ? 600 : Object.keys(gameState.players).length <= 4 ? 800 : 1000))}px` : '700px',
+            }}
+          >
             {/* Discard Pile Center */}
             {gameState.discardTop && (
               <div className={`${styles.discardPile} ${styles.discardCenter}`}>
@@ -680,18 +688,123 @@ export default function Home() {
               {(() => {
                 const seatedPlayers = otherPlayers
                 const count = seatedPlayers.length
-                const radius = 220
+                const totalPlayers = Object.keys(gameState.players).length
+                
+                // Calculate player area dimensions
+                // Card grid: 2×80px = 160px width, 2×120px = 240px height
+                // Plus padding and player name: ~200px width × ~300px height
+                const playerAreaWidth = 200
+                const playerAreaHeight = 300
+                const playerAreaRadius = Math.sqrt(playerAreaWidth ** 2 + playerAreaHeight ** 2) / 2 // ~180px
+                
+                // Discard pile dimensions (card + padding)
+                const discardPileRadius = 100
+                
+                // Calculate minimum radius to prevent overlaps
+                // Need space for: discard pile + player area + gap between them
+                // Increased gap to 60px to ensure no overlap after vertical shift
+                const minRadiusForDiscard = discardPileRadius + playerAreaRadius + 60 // 60px gap
+                
+                // Calculate minimum distance between player centers to prevent overlap
+                // For adjacent players, distance must be >= playerAreaRadius * 2 + gap
+                const minPlayerDistance = playerAreaRadius * 2 + 30 // 30px gap between players
+                
+                // Calculate radius based on player count and geometry
+                let radius: number
+                if (totalPlayers === 2) {
+                  // 2 players: just need distance from discard + player area
+                  radius = minRadiusForDiscard
+                } else if (totalPlayers === 3) {
+                  // 3 players: triangle - calculate based on angle between players
+                  // Angle between adjacent players: 120 degrees
+                  // Using law of cosines: distance = sqrt(2 * r^2 * (1 - cos(120°)))
+                  // We need distance >= minPlayerDistance
+                  // r >= minPlayerDistance / sqrt(2 * (1 - cos(120°)))
+                  const angleBetween = (120 * Math.PI) / 180
+                  const minRadiusForPlayers = minPlayerDistance / Math.sqrt(2 * (1 - Math.cos(angleBetween)))
+                  radius = Math.max(minRadiusForDiscard, minRadiusForPlayers)
+                } else if (totalPlayers === 4) {
+                  // 4 players: square - 90 degrees between adjacent
+                  const angleBetween = (90 * Math.PI) / 180
+                  const minRadiusForPlayers = minPlayerDistance / Math.sqrt(2 * (1 - Math.cos(angleBetween)))
+                  radius = Math.max(minRadiusForDiscard, minRadiusForPlayers)
+                } else {
+                  // 5+ players: evenly spaced
+                  const angleBetween = (360 / totalPlayers) * (Math.PI / 180)
+                  const minRadiusForPlayers = minPlayerDistance / Math.sqrt(2 * (1 - Math.cos(angleBetween)))
+                  radius = Math.max(minRadiusForDiscard, minRadiusForPlayers)
+                }
+                
+                // Add some extra padding to ensure no edge cases
+                radius = radius * 1.1
+                
+                // Vertical offset to shift everything down (matching discard pile shift from 50% to 55%)
+                // This creates more space at the top and prevents overlap
+                const verticalOffset = -30 // Shift down by 30px (5% of typical table height)
+                
+                // Calculate positions based on total player count
+                // Current player is always at bottom, other players arranged around
+                const getPlayerPosition = (index: number, total: number) => {
+                  if (total === 2) {
+                    // 2 players: across from each other
+                    // Current player at bottom, other at top (shifted down)
+                    return { x: 0, y: -radius + verticalOffset }
+                  } else if (total === 3) {
+                    // 3 players: triangle
+                    // Current player at bottom, others at top-left and top-right (shifted down)
+                    // Angles: -120° and 120° from top (top-left and top-right)
+                    const angles = [-120, 120] // degrees from top
+                    const angleRad = (angles[index] * Math.PI) / 180
+                    return {
+                      x: Math.sin(angleRad) * radius,
+                      y: -Math.cos(angleRad) * radius + verticalOffset, // Shifted down
+                    }
+                  } else if (total === 4) {
+                    // 4 players: square
+                    // Current player at bottom, others at top, left, right (shifted down)
+                    // Angles: 0° (top), 90° (right), 270° (left) from top
+                    const angles = [0, 90, 270]
+                    const angleRad = (angles[index] * Math.PI) / 180
+                    return {
+                      x: Math.sin(angleRad) * radius,
+                      y: -Math.cos(angleRad) * radius + verticalOffset, // Shifted down
+                    }
+                  } else if (total === 5) {
+                    // 5 players: pentagon
+                    // Current player at bottom (180°), others evenly spaced (shifted down)
+                    // Skip the bottom position and distribute others
+                    const angleStep = 360 / total
+                    const startAngle = -90 // Start from top (0°)
+                    // Skip the bottom position, so we start from index+1
+                    const angle = startAngle + angleStep * (index + 1)
+                    const angleRad = (angle * Math.PI) / 180
+                    return {
+                      x: Math.sin(angleRad) * radius,
+                      y: -Math.cos(angleRad) * radius + verticalOffset, // Shifted down
+                    }
+                  } else {
+                    // 6 players: hexagon (or more)
+                    // Current player at bottom, others evenly spaced (shifted down)
+                    const angleStep = 360 / total
+                    const startAngle = -90 // Start from top
+                    const angle = startAngle + angleStep * (index + 1)
+                    const angleRad = (angle * Math.PI) / 180
+                    return {
+                      x: Math.sin(angleRad) * radius,
+                      y: -Math.cos(angleRad) * radius + verticalOffset, // Shifted down
+                    }
+                  }
+                }
+                
                 return seatedPlayers.map((player, i) => {
-                  const angle = (2 * Math.PI * i) / (count || 1)
-                  const x = Math.cos(angle) * radius
-                  const y = Math.sin(angle) * radius
+                  const pos = getPlayerPosition(i, totalPlayers)
                   return (
                     <div
                       key={player.id}
                       className={styles.playerSeat}
                       style={{
-                        top: `calc(50% + ${y}px)`,
-                        left: `calc(50% + ${x}px)`,
+                        top: `calc(55% + ${pos.y}px)`, // Match discard pile vertical position (55%)
+                        left: `calc(50% + ${pos.x}px)`,
                       }}
                     >
                       <div className={styles.playerArea}>
